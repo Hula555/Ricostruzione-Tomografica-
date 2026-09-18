@@ -154,17 +154,17 @@ plt.show()
 # --- sezione 2D nel piano z piu' vicino a zp, con sorgente e rivelatori ---
 iz = np.argmin(np.abs(z_coords - zp))
 plt.figure()
-plt.imshow(A_rep[:, :, iz].T, origin='lower',
-           extent=(x_coords[0]-step/2, x_coords[-1]+step/2,
-                   y_coords[0]-step/2, y_coords[-1]+step/2),
-           vmin=0, vmax=dmu_a)
+im = plt.imshow(A_rep[:, :, iz].T, origin='lower',
+                 extent=(x_coords[0]-step/2, x_coords[-1]+step/2,
+                         y_coords[0]-step/2, y_coords[-1]+step/2),
+                 vmin=0, vmax=dmu_a)
 plt.scatter(0, 0, marker='*', c='red', s=120, label='Sorgente')
 plt.scatter(det_xy[:, 0], det_xy[:, 1], marker='o', c='cyan', label='Rivelatori')
 plt.xlabel('x [mm]'); plt.ylabel('y [mm]')
 plt.title(f"Sezione del vettore A nello spazio voxel\n"
           f"z $\\approx$ {z_coords[iz]:.0f} mm, step {step} mm")
 plt.legend(fontsize=8)
-plt.colorbar(label=r'$\delta\mu_a$ [$mm^{-1}$]')
+plt.colorbar(im, label=r'$\delta\mu_a$ [$mm^{-1}$]')
 plt.grid(); plt.show()
 
 # COMMENTO AI GRAFICI: la vista 3D mostra il "grumo" di voxel attivati
