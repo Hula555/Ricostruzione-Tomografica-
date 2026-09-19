@@ -11,10 +11,17 @@ coincidenti in r=0), qui si introducono tre differenze fondamentali:
     diffondente. A causa del mismatch di indice di rifrazione, la
     fluenza non si annulla sull'interfaccia fisica ma su un piano
     "estrapolato" z = -zb. Sorgente e rivelatori vengono modellati con
-    il METODO DELLE IMMAGINI: una sorgente reale, inserita ad una
-    profondità z0 (un cammino libero medio di trasporto) sotto la
-    superficie, ed una sorgente "immagine" di segno opposto, speculare
-    rispetto al piano estrapolato.
+    il METODO DELLE IMMAGINI, ma con una profondita' reale diversa fra i
+    due: la SORGENTE è inserita ad una profondità z0 (un cammino libero
+    medio di trasporto sotto la superficie), l'approssimazione standard
+    per una fibra di iniezione il cui fascio collimato diventa
+    effettivamente isotropo solo dopo un cammino libero medio nel
+    mezzo. I RIVELATORI, invece, raccolgono la luce esattamente
+    all'interfaccia fisica (non iniettano un fascio che debba
+    "isotropizzarsi"): la loro posizione reale è quindi a z=0. In
+    entrambi i casi, ad ogni punto reale si associa una sorgente/punto
+    "immagine" di segno opposto, speculare rispetto al piano
+    estrapolato z=-zb.
 
  2) SORGENTE E RIVELATORE NON COINCIDENTI: 8 rivelatori disposti a
     raggiera attorno alla sorgente (4 assi cartesiani + 4 bisettrici),
@@ -80,10 +87,11 @@ print(f"Distanza piano estrapolato zb:               {zb:.2f} mm")
 print(f"Piano estrapolato a z = -{zb:.2f} mm")
 print("="*55 + "\n")
 
-# Metodo delle immagini: ad ogni sorgente/rivelatore "reale", inserito a
-# profondita' z0 sotto l'interfaccia, si associa una sorgente "immagine"
-# di segno opposto, speculare rispetto al piano estrapolato z=-zb, cosi'
-# che la fluenza totale si annulli esattamente su tale piano.
+# Metodo delle immagini per la sorgente: inserita a profondita' z0 sotto
+# l'interfaccia, le si associa una sorgente "immagine" di segno opposto,
+# speculare rispetto al piano estrapolato z=-zb, cosi' che la fluenza
+# totale si annulli esattamente su tale piano. (Per i rivelatori si veda
+# lo Step 3: stessa idea, ma a profondita' reale z=0.)
 
 r_s0 = np.array([0.0, 0.0, z0])             # sorgente reale
 r_si = np.array([0.0, 0.0, -z0 - 2*zb])     # sorgente immagine
@@ -102,11 +110,16 @@ det_xy = np.array([[rho_sd*np.cos(np.radians(a)),
                      rho_sd*np.sin(np.radians(a))] for a in angoli])
 N_det = det_xy.shape[0]
 
-# Per reciprocita', anche i rivelatori vengono inseriti alla stessa
-# profondita' z0 della sorgente (stessa approssimazione), con la
-# relativa immagine.
-r_d0 = np.column_stack((det_xy, np.full(N_det, z0)))
-r_di = np.column_stack((det_xy, np.full(N_det, -z0 - 2*zb)))
+# A differenza della sorgente, per i rivelatori NON si applica la stessa
+# approssimazione "isotropa a profondita' z0": quel trucco approssima la
+# fibra di INIEZIONE, il cui fascio collimato diventa effettivamente
+# isotropo solo dopo un cammino libero medio di trasporto nel mezzo. Un
+# rivelatore, invece, raccoglie la luce esattamente all'interfaccia fisica:
+# la sua posizione reale e' quindi a z=0, non a z=z0. L'immagine (per il
+# metodo delle immagini) resta speculare rispetto al piano estrapolato
+# z=-zb, ma ora della posizione REALE z=0: z_immagine = -2*zb - 0 = -2*zb.
+r_d0 = np.column_stack((det_xy, np.full(N_det, 0.0)))
+r_di = np.column_stack((det_xy, np.full(N_det, -2*zb)))
 
 plt.rcParams['figure.dpi'] = 150
 fig, ax = plt.subplots(figsize=(5, 5))
@@ -155,7 +168,7 @@ for i in range(5):
     Di = 1/(3*mu_s[i]); z0_i = 1/mu_s[i]; zb_i = 2*A_coeff*Di
     rs_i = np.array([0, 0, z0_i])
     ri_i = np.array([0, 0, -z0_i - 2*zb_i])
-    rd_i = np.array([rho_sd, 0, z0_i])
+    rd_i = np.array([rho_sd, 0, 0.0])       # rivelatore alla superficie fisica (z=0)
     y = fluence_semiinf(mu_a0, mu_s[i], n_idx, t, rd_i, rs_i, ri_i)
     plt.semilogy(t, y)
 plt.title(f"Fluenza ($\\phi$) al rivelatore D1 - mezzo semi-infinito\n"

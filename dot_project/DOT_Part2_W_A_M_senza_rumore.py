@@ -57,8 +57,12 @@ angoli = np.arange(0, 360, 45)
 det_xy = np.array([[rho_sd*np.cos(np.radians(a)),
                      rho_sd*np.sin(np.radians(a))] for a in angoli])
 N_det = det_xy.shape[0]
-r_d0 = np.column_stack((det_xy, np.full(N_det, z0)))
-r_di = np.column_stack((det_xy, np.full(N_det, -z0 - 2*zb)))
+# I rivelatori, a differenza della sorgente, raccolgono la luce
+# esattamente all'interfaccia fisica (z=0): non si applica loro
+# l'approssimazione "isotropa a profondita' z0", giustificata solo per
+# la fibra di iniezione (Parte 1, Step 3).
+r_d0 = np.column_stack((det_xy, np.full(N_det, 0.0)))
+r_di = np.column_stack((det_xy, np.full(N_det, -2*zb)))
 
 # --- griglia spaziale, z>=0 (Parte 2, Step 2) ---
 step = 4.0
@@ -93,48 +97,43 @@ print("="*55 + "\n")
 # -----------------------
 # Il vettore A e' la rappresentazione discreta della perturbazione
 # fisica: A[m] = delta_mu_a nel voxel m-esimo (0 dove il mezzo e'
-# omogeneo). Per un'inclusione sferica di volume assegnato V_incl,
-# centrata in (xp,yp,zp), il raggio equivalente e'
+# omogeneo). Qui la perturbazione e' localizzata in UN SOLO voxel,
+# cubico, di lato "step" (volume V_vox = step^3): non un'inclusione
+# estesa approssimata da piu' voxel (come una sfera discretizzata), ma
+# la piu' piccola perturbazione rappresentabile sulla griglia. Questo
+# rende A un vettore con un solo elemento non nullo, e la ricostruzione
+# (Parte 4) diventa interpretabile come la risposta impulsiva (PSF) del
+# sistema a un singolo voxel perturbato.
 #
-#   r_eq = (3 V_incl / 4 pi)^(1/3)
-#
-# La regola di mappatura (identica, concettualmente, a quella usata nel
-# progetto originale) e': un voxel appartiene all'inclusione se il suo
-# CENTRO ricade dentro la sfera, |r_voxel - r_incl| < r_eq. Il volume
-# della sfera non e' in generale un multiplo esatto di V_vox, quindi il
-# "volume effettivo" discretizzato,
-#
-#   V_eff = V_vox * (numero di voxel selezionati)
-#
-# approssima V_incl con un errore dell'ordine di un voxel di superficie
-# della sfera - inevitabile quando si passa da una geometria continua a
-# una griglia discreta, e tanto piu' piccolo quanto piu' fine e' step.
-#
-# NOTA DI PROGRAMMAZIONE: `mask` e' un array booleano 3D (stessa forma
-# di X,Y,Z) che vale True nei voxel dentro la sfera; moltiplicato per
-# dmu_a da' la rappresentazione 3D "A_rep" (utile per i grafici),
-# mentre A_rep.flatten() da' il vettore 1D A nello stesso ordine lineare
-# di r_V (fondamentale: A[m] deve riferirsi allo stesso voxel di
-# r_V[m], altrimenti "M = W @ A" mescolerebbe le informazioni).
+# NOTA DI PROGRAMMAZIONE: la posizione richiesta (xp,yp,zp) viene
+# "scattata" (snap) al centro voxel piu' vicino tramite np.argmin sulle
+# coordinate di griglia, cosi' che la perturbazione coincida esattamente
+# con un elemento di X,Y,Z (e quindi di r_V) - non un punto arbitrario
+# fra due centri, come accadeva nella versione precedente (xp,yp,zp non
+# allineati alla griglia). A_rep e' zero ovunque tranne che in
+# (ix,iy,iz), dove vale dmu_a; A_rep.flatten() da' il vettore 1D A nello
+# stesso ordine lineare di r_V (fondamentale: A[m] deve riferirsi allo
+# stesso voxel di r_V[m], altrimenti "M = W @ A" mescolerebbe le
+# informazioni).
 
-dmu_a = 0.01           # variazione di assorbimento dell'inclusione [mm^-1]
-V_incl = 1000.0        # volume dell'inclusione [mm^3]
-r_eq = (V_incl*3/(4*pi))**(1/3)
+dmu_a = 0.01           # variazione di assorbimento nel voxel perturbato [mm^-1]
 
-xp, yp, zp = 15.0, 10.0, 20.0     # posizione dell'inclusione [mm]
+ix = np.argmin(np.abs(x_coords - 15.0))
+iy = np.argmin(np.abs(y_coords - 10.0))
+iz_p = np.argmin(np.abs(z_coords - 20.0))
+xp, yp, zp = x_coords[ix], y_coords[iy], z_coords[iz_p]   # centro voxel esatto
+V_incl = V_vox         # la perturbazione occupa esattamente un voxel
 
-mask = (X - xp)**2 + (Y - yp)**2 + (Z - zp)**2 < r_eq**2
-A_rep = mask*dmu_a                # rappresentazione 3D di A (per i grafici)
+A_rep = np.zeros_like(X)
+A_rep[ix, iy, iz_p] = dmu_a
 A = A_rep.flatten()               # vettore voxel 1D (stesso ordine di r_V)
-V_eff = V_vox*int(np.sum(mask))
 
 print("="*55)
-print("VETTORE VOXEL A (inclusione sferica)")
+print("VETTORE VOXEL A (singolo voxel cubico, centrato in griglia)")
 print("="*55)
-print(f"Posizione: xp={xp} mm, yp={yp} mm, zp={zp} mm | V_incl={V_incl} mm^3 "
-      f"-> r_eq={r_eq:.2f} mm")
-print(f"Voxel selezionati: {int(np.sum(mask))} | Volume effettivo: {V_eff} mm^3")
-print(f"delta_mu_a nell'inclusione: {dmu_a} mm^-1")
+print(f"Posizione (centro voxel): xp={xp:.1f} mm, yp={yp:.1f} mm, zp={zp:.1f} mm")
+print(f"Volume del voxel perturbato: V_incl = V_vox = {V_incl} mm^3")
+print(f"delta_mu_a nel voxel: {dmu_a} mm^-1")
 print("="*55 + "\n")
 
 # --- rappresentazione 3D del vettore A nello spazio dei voxel ---
@@ -148,13 +147,12 @@ ax.voxels(Xe, Ye, Ze, A_rep, edgecolor='k', alpha=0.8)
 ax.set(xlabel='x [mm]', ylabel='y [mm]', zlabel='z [mm]')
 ax.invert_zaxis()
 fig.suptitle(f"Vettore A: rappresentazione 3D nello spazio voxel\n"
-             f"Step {step} mm, volume effettivo {V_eff} mm$^3$")
+             f"Step {step} mm, 1 voxel perturbato, volume {V_incl} mm$^3$")
 plt.show()
 
-# --- sezione 2D nel piano z piu' vicino a zp, con sorgente e rivelatori ---
-iz = np.argmin(np.abs(z_coords - zp))
+# --- sezione 2D nel piano z del voxel perturbato, con sorgente e rivelatori ---
 plt.figure()
-im = plt.imshow(A_rep[:, :, iz].T, origin='lower',
+im = plt.imshow(A_rep[:, :, iz_p].T, origin='lower',
                  extent=(x_coords[0]-step/2, x_coords[-1]+step/2,
                          y_coords[0]-step/2, y_coords[-1]+step/2),
                  vmin=0, vmax=dmu_a)
@@ -162,22 +160,24 @@ plt.scatter(0, 0, marker='*', c='red', s=120, label='Sorgente')
 plt.scatter(det_xy[:, 0], det_xy[:, 1], marker='o', c='cyan', label='Rivelatori')
 plt.xlabel('x [mm]'); plt.ylabel('y [mm]')
 plt.title(f"Sezione del vettore A nello spazio voxel\n"
-          f"z $\\approx$ {z_coords[iz]:.0f} mm, step {step} mm")
+          f"z = {zp:.0f} mm, step {step} mm")
 plt.legend(fontsize=8)
 plt.colorbar(im, label=r'$\delta\mu_a$ [$mm^{-1}$]')
 plt.grid(); plt.show()
 
-# COMMENTO AI GRAFICI: la vista 3D mostra il "grumo" di voxel attivati
-# dall'inclusione (asse z invertito per leggere la profondita' verso il
-# basso, come nella sezione laterale di Parte 2). La sezione 2D, presa
-# al piano z piu' vicino a zp=20mm, mostra l'inclusione (xp=15,yp=10) in
-# posizione ASIMMETRICA rispetto alla sorgente (stella, nell'origine) e
-# ai rivelatori (cerchi, sul cerchio di raggio 12mm): a differenza del
-# progetto originale (dove l'inclusione era spesso posta sull'asse
-# sorgente-rivelatore per simmetria), qui la geometria a 8 rivelatori
-# rende ogni posizione "vista" in modo diverso da ciascun rivelatore -
-# proprio l'informazione che permettera', nella Parte 3, di localizzarla
-# per triangolazione.
+# COMMENTO AI GRAFICI: la vista 3D mostra un SINGOLO cubetto (asse z
+# invertito per leggere la profondita' verso il basso, come nella sezione
+# laterale di Parte 2), non piu' un "grumo" di piu' voxel come nella
+# versione precedente (inclusione sferica approssimata). La sezione 2D,
+# presa esattamente al piano z del voxel perturbato, mostra un singolo
+# pixel colorato in posizione ASIMMETRICA rispetto alla sorgente (stella,
+# nell'origine) e ai rivelatori (cerchi, sul cerchio di raggio 12mm): la
+# geometria a 8 rivelatori rende ogni posizione "vista" in modo diverso
+# da ciascun rivelatore - proprio l'informazione che permettera', nella
+# Parte 3, di localizzarla per triangolazione. Un singolo voxel e' anche
+# il test piu' severo per la ricostruzione (Parte 4): la sua risposta
+# ricostruita e' letteralmente la PSF (point spread function) del
+# sistema.
 
 
 # %% =============================================================
@@ -201,10 +201,10 @@ plt.grid(); plt.show()
 #
 #   M = W . A
 #
-# qualunque sia la distribuzione A (somma di piu' inclusioni, inclusioni
-# di forma qualsiasi, ecc.), non solo per la singola inclusione sferica
-# dello Step 2: la linearita' del prim'ordine di Born si eredita
-# direttamente nella struttura MATRICE x VETTORE.
+# qualunque sia la distribuzione A (somma di piu' voxel perturbati,
+# inclusioni di forma qualsiasi, ecc.), non solo per il singolo voxel
+# perturbato dello Step 2: la linearita' del prim'ordine di Born si
+# eredita direttamente nella struttura MATRICE x VETTORE.
 #
 # NOTA DI PROGRAMMAZIONE (vettorizzazione): per ogni rivelatore d,
 # calcoliamo le 4 distanze voxel-sorgente(i) e voxel-rivelatore(i) come
@@ -390,7 +390,7 @@ plt.colorbar(im, label='C (-)')
 plt.tight_layout(); plt.show()
 
 # COMMENTO AL GRAFICO: i rivelatori piu' vicini alla proiezione xy
-# dell'inclusione (xp=15,yp=10, quindi principalmente D2 a 45 gradi,
+# del voxel perturbato (xp=14,yp=10, quindi principalmente D2 a 45 gradi,
 # ma anche D1 e D3) mostrano il contrasto maggiore in valore assoluto,
 # mentre i rivelatori diametralmente opposti (D5, D6) ne vedono uno
 # quasi nullo: e' esattamente il pattern di asimmetria azimutale

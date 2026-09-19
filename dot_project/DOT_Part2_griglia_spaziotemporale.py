@@ -42,9 +42,11 @@ immagini):
 #
 #   x_k = rho_sd cos(a_k) ,   y_k = rho_sd sin(a_k)
 #
-# Ogni rivelatore, come la sorgente, viene trattato con il metodo delle
-# immagini della Parte 1: la sua posizione "attiva" (reale) e' a
-# profondita' z0 sotto (x_k,y_k), quella immagine e' a -z0-2zb.
+# Ogni rivelatore viene trattato con il metodo delle immagini della
+# Parte 1, ma a differenza della sorgente (dove l'approssimazione
+# "isotropa a profondita' z0" modella la fibra di iniezione) il
+# rivelatore raccoglie la luce esattamente all'interfaccia: la sua
+# posizione reale e' quindi (x_k,y_k,0), quella immagine e' -2zb.
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -75,13 +77,18 @@ det_xy = np.array([[rho_sd*np.cos(np.radians(a)),
                      rho_sd*np.sin(np.radians(a))] for a in angoli])
 N_det = det_xy.shape[0]
 
-r_d0 = np.column_stack((det_xy, np.full(N_det, z0)))              # rivelatori reali
-r_di = np.column_stack((det_xy, np.full(N_det, -z0 - 2*zb)))      # rivelatori immagine
+# A differenza della sorgente (approssimata come isotropa a profondita'
+# z0, il trucco standard per una fibra di iniezione), i rivelatori
+# raccolgono la luce esattamente all'interfaccia fisica: la loro
+# posizione reale e' z=0, con immagine speculare a z=-2*zb.
+r_d0 = np.column_stack((det_xy, np.full(N_det, 0.0)))             # rivelatori reali (z=0)
+r_di = np.column_stack((det_xy, np.full(N_det, -2*zb)))           # rivelatori immagine
 
 print("="*55)
 print("GEOMETRIA SORGENTE-RIVELATORI (mezzo semi-infinito)")
 print("="*55)
 print(f"Sorgente: origine (0,0,0); sorgente reale equivalente a z0={z0:.2f} mm")
+print(f"Rivelatori: posizione reale a z=0 (superficie fisica)")
 print(f"Bordo estrapolato a z = {-zb:.2f} mm (A={A_coeff:.3f})")
 print(f"N. rivelatori: {N_det}, a raggiera, rho_sd = {rho_sd:.0f} mm")
 for k, (xy, ang) in enumerate(zip(det_xy, angoli)):
