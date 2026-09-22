@@ -412,3 +412,25 @@ for k in k_show:
           f"| massa negativa/positiva = {neg_mass/max(pos_mass,1e-30):.2f}   "
           f"| voxel per il 50% della massa |A_hat| = {n50}")
 print("="*55)
+
+# --- confronto di INTENSITA': dmu_a vero vs ricostruito ---
+# Due letture distinte: (a) il valore ricostruito esattamente nel/i
+# voxel dove si trova la perturbazione vera (localizzazione nota a
+# priori, qui usata solo come sonda) e (b) il valore di picco globale
+# di A_hat, ovunque esso cada (la lettura realistica, quando la
+# posizione vera non e' nota).
+idx_true = np.flatnonzero(mask.flatten())   # voxel della perturbazione vera
+
+print("\n" + "="*55)
+print("CONFRONTO INTENSITA': dmu_a vero vs dmu_a ricostruito")
+print("="*55)
+print(f"dmu_a vero (nella perturbazione) = {dmu_a:+.4f} mm^-1")
+for k in k_show:
+    A_hat = tsvd_solve(M_ideal_flat, k)
+    val_true_voxel = A_hat[idx_true].mean()
+    val_peak = A_hat[np.argmax(A_hat)]
+    print(f"k={k:3d}:  ricostruito nel voxel vero = {val_true_voxel:+.4f} mm^-1 "
+          f"(rapporto ric./vero = {val_true_voxel/dmu_a:+.2f})   "
+          f"| picco globale ricostruito = {val_peak:+.4f} mm^-1 "
+          f"(rapporto picco/vero = {val_peak/dmu_a:+.2f})")
+print("="*55)
