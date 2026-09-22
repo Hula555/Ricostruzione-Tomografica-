@@ -478,3 +478,74 @@ for k in k_show:
           f"(rapporto forzato/vero = {x_fit/dmu_a:+.2f})   "
           f"| residuo relativo del fit sui dati = {resid_rel:.2e}")
 print("="*55)
+
+
+# %% =============================================================
+# STEP 10 - Effetto della dimensione dell'inclusione sul broadening
+#           di intensita' (dmu_a fisso, volume variabile)
+# ==================================================================
+# Negli Step 8/9 si e' visto che una perturbazione PUNTIFORME (1
+# voxel) viene fortemente attenuata in ampiezza dalla ricostruzione
+# TSVD "libera" (senza vincolo di sparsita'): la soluzione a norma
+# minima spalma la sua energia su centinaia di voxel. Qui si verifica
+# se questo effetto dipende dalla dimensione fisica dell'inclusione: a
+# dmu_a fisso, si allarga progressivamente il cubo perturbato (stesso
+# centro xp,yp,zp di prima) e si confronta l'ampiezza ricostruita (a
+# rango pieno, k=k_max, il caso migliore fra i troncamenti visto lo
+# Step 7) con il vero dmu_a.
+#
+# Intuizione: poiche' W e' lineare e non dipende da A, la ricostruzione
+# a norma minima si comporta come una convoluzione dell'oggetto vero
+# con una point-spread function (PSF) fissata dalla geometria del
+# sistema (rivelatori/gate), non dall'oggetto stesso. Un'inclusione
+# piu' piccola della PSF ha tutta la sua energia diluita nella
+# sfocatura (forte sottostima, come visto per il singolo voxel); una
+# inclusione piu' grande della PSF e' invece sfocata solo sui bordi:
+# al centro ogni voxel "riceve" contributo da voxel vicini con lo
+# STESSO dmu_a vero, quindi l'ampiezza recuperata nel nucleo
+# dell'inclusione si riavvicina (e puo' perfino superare leggermente,
+# per effetti di discretizzazione a rango finito) il valore vero.
+
+# lati testati: 4, 8, 16, 24 mm - scelti per restare entro i margini
+# della griglia rispetto al centro (xp,yp,zp) = (14, 10, 18) mm
+L_test_values = [step, 2*step, 4*step, 6*step]
+center_p = np.array([xp, yp, zp])
+
+peak_ratios, core_ratios, N_incl_list = [], [], []
+
+print("="*55)
+print("EFFETTO DELLA DIMENSIONE DELL'INCLUSIONE SUL BROADENING (k = k_max)")
+print("="*55)
+print(f"dmu_a vero (nella perturbazione) = {dmu_a:+.4f} mm^-1")
+print(f"{'L_incl [mm]':>12} {'N_incl':>7} {'V_incl [mm^3]':>14} {'picco/vero':>12} {'nucleo/vero':>12}")
+for L_test in L_test_values:
+    mask_test = ((np.abs(X - xp) <= L_test/2) &
+                 (np.abs(Y - yp) <= L_test/2) &
+                 (np.abs(Z - zp) <= L_test/2))
+    N_incl_test = int(mask_test.sum())
+    if N_incl_test == 0:
+        continue
+
+    A_test = (mask_test * dmu_a).flatten()
+    M_test_flat = W @ A_test
+    A_hat_test = tsvd_solve(M_test_flat, k_max)
+
+    idx_true_test = np.flatnonzero(mask_test.flatten())
+    idx_core = idx_true_test[np.argmin(np.linalg.norm(r_V[idx_true_test] - center_p, axis=1))]
+
+    peak_ratio = A_hat_test.max() / dmu_a
+    core_ratio = A_hat_test[idx_core] / dmu_a
+    peak_ratios.append(peak_ratio); core_ratios.append(core_ratio); N_incl_list.append(N_incl_test)
+
+    print(f"{L_test:12.1f} {N_incl_test:7d} {N_incl_test*V_vox:14.0f} {peak_ratio:12.3f} {core_ratio:12.3f}")
+print("="*55)
+
+plt.figure(figsize=(6, 4.5))
+plt.plot(L_test_values[:len(core_ratios)], core_ratios, 'o-', label='nucleo (voxel centrale) / vero')
+plt.plot(L_test_values[:len(peak_ratios)], peak_ratios, 's--', label='picco globale / vero')
+plt.axhline(1.0, color='gray', linestyle=':', linewidth=1, label='ricostruzione esatta')
+plt.xlabel("lato dell'inclusione cubica [mm]")
+plt.ylabel(r'rapporto $\hat{A}$ / $\delta\mu_a$ vero')
+plt.title("Recupero di ampiezza al crescere della dimensione dell'inclusione\n"
+          "(dati ideali, ricostruzione TSVD a rango pieno k=k_max)")
+plt.legend(); plt.grid(); plt.show()
