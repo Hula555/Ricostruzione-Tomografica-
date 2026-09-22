@@ -434,3 +434,47 @@ for k in k_show:
           f"| picco globale ricostruito = {val_peak:+.4f} mm^-1 "
           f"(rapporto picco/vero = {val_peak/dmu_a:+.2f})")
 print("="*55)
+
+
+# %% =============================================================
+# STEP 9 - Ricostruzione vincolata (detect-then-fit): forzare tutta la
+#          perturbazione nel voxel di picco individuato dalla TSVD
+# ==================================================================
+# Una volta localizzato il voxel piu' plausibile (picco di A_hat), si
+# puo' risolvere un problema molto piu' piccolo e ben posto: un'unica
+# incognita scalare (l'ampiezza dmu_a in quel voxel), contro le 96
+# misure disponibili. E' un minimo quadrato 1D lineare:
+#
+#   min_x || W[:, j]*x - M ||^2   =>   x = (W[:,j] . M) / (W[:,j] . W[:,j])
+#
+# A differenza della TSVD "libera" (che distribuisce l'energia su
+# centinaia di voxel per minimizzare la norma della soluzione), qui si
+# impone a priori che la soluzione sia sparsa e concentrata in un solo
+# voxel: il problema passa da fortemente sottodeterminato (96 misure,
+# 2048 incognite) a fortemente sovradeterminato (96 misure, 1
+# incognita), quindi l'ampiezza recuperata e' molto meno smorzata.
+# Il prezzo e' che questa ipotesi (un solo voxel, nella posizione
+# individuata dalla TSVD) va verificata: se e' sbagliata (voxel di
+# picco errato, inclusione estesa o multipla) il fit forza comunque
+# tutta l'energia li', introducendo un bias sistematico.
+
+print("\n" + "="*55)
+print("RICOSTRUZIONE VINCOLATA (detect-then-fit): forzatura sul voxel di picco")
+print("="*55)
+print(f"dmu_a vero (nella perturbazione) = {dmu_a:+.4f} mm^-1\n")
+for k in k_show:
+    A_hat = tsvd_solve(M_ideal_flat, k)
+    idx_peak = np.argmax(A_hat)
+    peak_pos = r_V[idx_peak]
+    voxel_corretto = idx_peak in idx_true
+
+    w_j = W[:, idx_peak]
+    x_fit = (w_j @ M_ideal_flat) / (w_j @ w_j)
+    resid_rel = np.linalg.norm(w_j*x_fit - M_ideal_flat) / np.linalg.norm(M_ideal_flat)
+
+    print(f"k={k:3d}:  voxel di picco = ({peak_pos[0]:5.2f}, {peak_pos[1]:5.2f}, {peak_pos[2]:5.2f}) mm "
+          f"{'(voxel vero)' if voxel_corretto else '(voxel SBAGLIATO)'}")
+    print(f"        dmu_a forzato su quel voxel = {x_fit:+.4f} mm^-1 "
+          f"(rapporto forzato/vero = {x_fit/dmu_a:+.2f})   "
+          f"| residuo relativo del fit sui dati = {resid_rel:.2e}")
+print("="*55)
