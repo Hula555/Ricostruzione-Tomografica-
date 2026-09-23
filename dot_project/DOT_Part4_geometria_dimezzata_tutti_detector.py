@@ -136,7 +136,9 @@ print("="*55 + "\n")
 dmu_a = 0.01
 V_phys = V_vox
 
-xp, yp, zp = 14.0, 10.0, 18.0
+xp, yp, zp = 6.0, 6.0, 18.0   # spostata dentro l'impronta dell'array dimezzato
+                               # (era 14,10,18: verificato che (6,6,18) e' comunque
+                               # un centro voxel esatto sul reticolo, step=4mm)
 
 L_incl = V_phys**(1/3)
 mask = ((np.abs(X - xp) <= L_incl/2) &
