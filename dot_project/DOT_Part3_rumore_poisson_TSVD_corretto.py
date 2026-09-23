@@ -308,8 +308,9 @@ N0_ideal = N_tot_TPSF * Phi0_int / Phi0_tot[:, None]
 Npert_ideal = N0_ideal * (1 + M_ideal)
 
 # --- 4) Realizzazioni poissoniane indipendenti delle due acquisizioni ---
-N0_noisy = rng.poisson(N0_ideal)
-Npert_noisy = rng.poisson(np.clip(Npert_ideal, 0, None))
+# conversione a float: con interi a 64 bit (N0+1)**3 va in overflow per N0 > ~2e6
+N0_noisy = rng.poisson(N0_ideal).astype(float)
+Npert_noisy = rng.poisson(np.clip(Npert_ideal, 0, None)).astype(float)
 
 # --- 5) Contrasto stimato dai conteggi ---
 # (N_p - N_0)/N_0 ha bias ~ 1/lambda0 (E[1/N] != 1/lambda), confrontabile
