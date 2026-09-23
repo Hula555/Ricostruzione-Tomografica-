@@ -85,7 +85,14 @@ r_di = np.column_stack((det_xy, np.full(N_det, -2*zb)))
 #     tengono solo i rivelatori alla distanza MINIMA da essa (primi vicini,
 #     entro una tolleranza tol_vicini).
 # modalita_coppie = "tutte": tutte le coppie s-d (versione precedente).
-modalita_coppie = "primi_vicini"
+# NB (versione con rumore): con i soli primi vicini (24 coppie, rho = 12 mm)
+# e 12 gate su 1.0-3.4 ns, sopra il rumore restano ~25 modi e la risoluzione
+# a 20 mm di profondita' e' ~20 mm: l'inclusione 2x2x2 si localizza ma non
+# si "vede" come immagine. Con tutte le coppie (72, rho = 12-34 mm) e 20
+# gate su 0.4-4.4 ns i modi utili salgono a ~125 e, con la ricostruzione
+# vincolata dello Step 11, l'inclusione viene ricostruita. Per tornare alla
+# configurazione originale: "primi_vicini", t_start = 1.0, N_gates = 12.
+modalita_coppie = "tutte"
 tol_vicini = 0.5     # [mm] tolleranza per considerare "uguali" due distanze
 
 pairs = []
@@ -118,12 +125,12 @@ V_vox = step**3
 ext_xy = (x_coords[0]-step/2, x_coords[-1]+step/2,
           y_coords[0]-step/2, y_coords[-1]+step/2)
 
-# --- tempo e time gating (12 gate fissi da 0.2 ns) ---------------------------
+# --- tempo e time gating (gate fissi da 0.2 ns) ---------------------------
 dt = 0.05
 t = np.arange(0.1, 10.0, dt)
-t_start = 1.0
+t_start = 0.4        # (configurazione originale: 1.0)
 gate_width = 0.20
-N_gates = 12
+N_gates = 20         # (configurazione originale: 12) -> range 0.4-4.4 ns
 gates = [(t_start + gate_width*i, t_start + gate_width*(i + 1)) for i in range(N_gates)]
 gate_indices = [(np.searchsorted(t, g[0]), np.searchsorted(t, g[1])) for g in gates]
 for g_i, (i0, i1) in enumerate(gate_indices):
@@ -401,8 +408,8 @@ fig.tight_layout(); plt.show()
 #     lambdap_pg = lambda0_pg * (1 + M_pg)                          (Born)
 # Baseline e misura perturbata sono due acquisizioni indipendenti, quindi
 #     sigma_M^2 ~ (1+M)(2+M)/lambda0 ~ 2/lambda0     (metodo delta)
-# NB: tutte le coppie ai primi vicini hanno rho = 12 mm: la TPSF ha il
-# picco a ~0.2 ns e i gate 1.0-3.4 ns ne contengono solo ~2.5%.
+# NB: la frazione di TPSF che cade nei gate dipende da rho e dal range dei
+# gate (con rho = 12 mm e gate 1.0-3.4 ns era solo ~2.5%).
 # NB (inverse crime): dati e inversione usano lo stesso modello lineare.
 N_tot_TPSF = 1e8          # conteggi sull'intera TPSF, per coppia s-d
 rng = np.random.default_rng(42)
@@ -803,3 +810,132 @@ axs[1].set(xscale='log', xlabel='N_tot (conteggi/TPSF/coppia)', ylabel=r'$\delta
            title=r'Stima di $\delta\mu_a$ (scansione di blocchi)')
 axs[1].grid()
 plt.tight_layout(); plt.show()
+
+
+# %% =============================================================
+# STEP 11 - Risoluzione della TSVD e ricostruzione VINCOLATA
+# ==================================================================
+# (a) Perche' l'immagine TSVD e' sfocata: con k modi la TSVD restituisce
+#         A_hat = R A,   R = V_k V_k^T   (matrice di risoluzione)
+#     La colonna di R relativa a un voxel e' la sua "point spread function"
+#     (PSF): se la PSF e' piu' larga dell'inclusione, l'immagine e' una
+#     macchia larga quanto la PSF, con ampiezza ridotta (volume parziale).
+#     Il rumore limita k (Step 7), quindi limita la risoluzione.
+j0 = np.where(mask.flatten())[0][0]              # un voxel dell'inclusione
+R_col = Vtw[:k_disc, :].T @ Vtw[:k_disc, j0]
+half = R_col >= 0.5 * R_col.max()
+psf_ext = r_V[half].max(0) - r_V[half].min(0) + step
+print("="*60)
+print(f"RISOLUZIONE TSVD (k = {k_disc}): larghezza a meta' altezza della PSF")
+print(f"   nel voxel {r_V[j0]}: x = {psf_ext[0]:.0f} mm, y = {psf_ext[1]:.0f} mm, "
+      f"z = {psf_ext[2]:.0f} mm   (inclusione: {L_blk[0]:.0f} mm di lato)")
+print("="*60 + "\n")
+
+# (b) Ricostruzione vincolata: si aggiunge l'informazione a priori che
+#     l'inclusione e' un ASSORBITORE (dmu_a >= 0) e LOCALIZZATO (sparso):
+#         min_x  1/2 ||W_w D^-1 x - M_w||^2 + lam * sum(x),   x >= 0,
+#         A_hat = D^-1 x,   D = diag(||colonne di W_w||)
+#     D compensa il calo di sensibilita' con la profondita' (senza D la
+#     penalita' L1 favorirebbe i voxel superficiali). I voxel quasi
+#     invisibili (norma della colonna < soglia_oss * massimo, tipicamente
+#     angoli profondi lontani dagli optodi) sono esclusi dalle incognite:
+#     con D^-1 enorme, un loro valore minuscolo di x diventerebbe un
+#     artefatto enorme in A_hat.
+#     Si risolve con FISTA (gradiente proiettato accelerato). lam e' scelto
+#     col principio di discrepanza: si parte da lam grande e lo si riduce
+#     (warm start) finche' chi^2 <= N_meas + 2*sqrt(2*N_meas), cioe' entro
+#     2 deviazioni standard dal chi^2 atteso del solo rumore.
+soglia_oss = 1e-2
+
+def fista_nn_l1(B, m, lam, x0=None, n_iter=2000):
+    """min 1/2||B x - m||^2 + lam*sum(x), x >= 0 (FISTA)."""
+    Lip = np.linalg.norm(B, 2)**2
+    x = np.zeros(B.shape[1]) if x0 is None else x0.copy()
+    y, tk = x.copy(), 1.0
+    for _ in range(n_iter):
+        x_new = np.maximum(y - (B.T @ (B @ y - m) + lam) / Lip, 0)
+        t_new = (1 + np.sqrt(1 + 4*tk*tk)) / 2
+        y = x_new + (tk - 1) / t_new * (x_new - x)
+        x, tk = x_new, t_new
+    return x
+
+def ricostruzione_vincolata(M_flat, sig,
+                            fattori=(0.3, 0.1, 0.03, 0.01, 0.003, 0.001, 3e-4, 1e-4)):
+    Bw = W / sig[:, None]
+    col = np.linalg.norm(Bw, axis=0)
+    oss = col >= soglia_oss * col.max()            # voxel osservabili
+    B = Bw[:, oss] / col[oss]
+    m = M_flat / sig
+    lam_max = np.abs(B.T @ m).max()
+    chi2_target = N_meas + 2*np.sqrt(2*N_meas)
+    x = None
+    for f in fattori:
+        x = fista_nn_l1(B, m, f * lam_max, x0=x)
+        chi2_x = np.sum((B @ x - m)**2)
+        if chi2_x <= chi2_target:
+            break
+    A_out = np.zeros(N_vox)
+    A_out[oss] = x / col[oss]
+    return A_out, f, chi2_x, int(oss.sum())
+
+A_con, f_lam, chi2_con, n_oss = ricostruzione_vincolata(M_noisy_flat, sig_flat)
+
+def metriche(A_hat):
+    j = np.argmax(A_hat)
+    cl = A_hat >= soglia_cluster * A_hat[j]
+    r_bar = (A_hat[cl, None] * r_V[cl]).sum(0) / A_hat[cl].sum()
+    vero = A > 0
+    dice = 2 * (cl & vero).sum() / (cl.sum() + vero.sum())
+    return r_bar, dice, cl.sum(), A_hat[vero].sum() / A[vero].sum()
+
+print("="*60)
+print("CONFRONTO RICOSTRUZIONI (dati rumorosi)")
+print("="*60)
+print("Dice = sovrapposizione fra voxel >= 50% del picco e inclusione vera (1 = perfetta)")
+for nome, A_hat in [(f"TSVD pesata, k={k_disc}", A_hats[k_disc]),
+                    (f"vincolata (>=0, L1), lam={f_lam:g}*lam_max", A_con)]:
+    r_bar, dice, ncl, frac_massa = metriche(A_hat)
+    print(f"{nome:38s}: baricentro ({r_bar[0]:5.1f}, {r_bar[1]:5.1f}, {r_bar[2]:5.1f}) mm, "
+          f"|errore| = {np.linalg.norm(r_bar - r_true):4.1f} mm, Dice = {dice:.2f}, "
+          f"voxel = {ncl}, massa recuperata nei voxel veri = {100*frac_massa:.0f}%")
+print(f"   ricostruzione vincolata: {n_oss} voxel osservabili su {N_vox}, "
+      f"chi^2 = {chi2_con:.0f} (atteso {N_meas} +- {np.sqrt(2*N_meas):.0f})")
+print(f"   dmu_a medio nei voxel dell'inclusione = {A_con[mask.flatten()].mean():.2e} "
+      f"(vero {dmu_a:.2e})")
+print("="*60)
+
+# --- immagini: strati z dell'inclusione e sezioni verticali ---
+fig, axs = plt.subplots(len(iz_layers), 3, figsize=(13, 4.2*len(iz_layers)), squeeze=False)
+for r_i, iz in enumerate(iz_layers):
+    for c_i, (img, tit, cmap, vmin, vmax) in enumerate([
+            (A_rep, '$A$ vero', 'viridis', 0, dmu_a),
+            (A_hats[k_disc].reshape(Nx, Ny, Nz), f'TSVD pesata, $k$={k_disc}', 'RdBu_r', None, None),
+            (A_con.reshape(Nx, Ny, Nz), 'vincolata ($\\geq 0$, L1)', 'viridis', 0, None)]):
+        ax = axs[r_i, c_i]
+        sec = img[:, :, iz].T
+        if vmin is None:
+            vm = np.abs(img).max(); vmin, vmax = -vm, vm
+        im = ax.imshow(sec, origin='lower', cmap=cmap, vmin=vmin,
+                       vmax=vmax if vmax is not None else img.max(), extent=ext_xy)
+        disegna_optodi(ax, c_src='k', c_det='w', s_src=30, s_det=12, alpha=0.6, label=False)
+        ax.add_patch(plt.Rectangle((xp - L_blk[0]/2, yp - L_blk[1]/2), L_blk[0], L_blk[1],
+                                   fc='none', ec='lime', lw=1.2))
+        ax.set_title(f'{tit}, z = {z_coords[iz]:.0f} mm', fontsize=9)
+        fig.colorbar(im, ax=ax, shrink=0.8)
+fig.suptitle('Ricostruzione con shot noise: TSVD vs ricostruzione vincolata (riquadro verde = vero)')
+fig.tight_layout(); plt.show()
+
+iy_c = np.argmin(np.abs(y_coords - (yp - step/2)))    # sezione x-z attraverso l'inclusione
+fig, axs = plt.subplots(1, 3, figsize=(15, 3.8))
+for ax, (img, tit, cmap) in zip(axs, [(A_rep, '$A$ vero', 'viridis'),
+                                      (A_hats[k_disc].reshape(Nx, Ny, Nz), f'TSVD pesata, $k$={k_disc}', 'RdBu_r'),
+                                      (A_con.reshape(Nx, Ny, Nz), 'vincolata', 'viridis')]):
+    sec = img[:, iy_c, :].T
+    vm = np.abs(img).max()
+    im = ax.imshow(sec, origin='upper', cmap=cmap, vmin=-vm if cmap == 'RdBu_r' else 0, vmax=vm,
+                   extent=(ext_xy[0], ext_xy[1], z_coords[-1] + step/2, 0), aspect='equal')
+    ax.add_patch(plt.Rectangle((xp - L_blk[0]/2, zp - L_blk[2]/2), L_blk[0], L_blk[2],
+                               fc='none', ec='lime', lw=1.2))
+    ax.set(xlabel='x [mm]', ylabel='z [mm]', title=f'{tit}, sezione y = {y_coords[iy_c]:.0f} mm')
+    fig.colorbar(im, ax=ax, shrink=0.8)
+fig.tight_layout(); plt.show()
