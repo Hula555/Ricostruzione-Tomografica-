@@ -21,14 +21,19 @@ zb = 2*A_coeff*D
 
 # --- NUOVA GEOMETRIA: sorgenti accese in sequenza (switch), N_det rivelatori
 #     misurano la DTOF per ciascuna sorgente attiva --------------------------
-# Coordinate (x, y) in mm, superficie fisica z = 0. Geometria "a croce" per
-# le sorgenti e "a diamante" per i rivelatori, come disegnata sullo
+# Coordinate (x, y) in mm, superficie fisica z = 0. Geometria "a croce" (4
+# sorgenti a raggio 12mm) + 4 sorgenti aggiuntive in (24,12) e nelle
+# posizioni speculari degli altri 3 quadranti, come disegnata sullo
 # strumento interattivo (griglia -32..+32 mm).
 src_xy = np.array([
     [0.0,  12.0],
     [-12.0, 0.0],
     [12.0,  0.0],
     [0.0, -12.0],
+    [24.0,  12.0],    # sorgenti aggiuntive: (24,12) e i 3 speculari
+    [-24.0, 12.0],
+    [-24.0, -12.0],
+    [24.0, -12.0],
 ])
 N_src = src_xy.shape[0]
 
@@ -325,29 +330,31 @@ fig.suptitle(f"Sensitivita' " r"$\log_{10}|W|$" f" per i rivelatori tenuti (prim
 fig.colorbar(im, ax=axs, shrink=0.8)
 plt.show()
 
-# --- confronto fra TUTTE le sorgenti, rivelatore fissato -------------------
+# --- confronto fra le sorgenti che condividono un rivelatore ---------------
 # Mostra perche' accendere sorgenti diverse aiuta: ogni sorgente "illumina"
 # il volume da un'angolazione diversa, cambiando la mappa di sensitivita'
-# vista dallo STESSO rivelatore. d_fix = D1 (l'origine), che per questa
-# geometria e' fra i "primi vicini" di TUTTE le sorgenti (distanza 12 mm da
-# ognuna), quindi il confronto e' sempre valido.
+# vista dallo STESSO rivelatore. Con 8 sorgenti (le 4 originali + le 4
+# aggiuntive in (24,12) e speculari) non esiste piu' un rivelatore comune a
+# TUTTE: D1 (l'origine) e' fra i "primi vicini" solo delle 4 sorgenti
+# originali (le 4 aggiuntive sono troppo lontane da D1). Si confrontano
+# quindi solo le sorgenti per cui d_fix e' effettivamente un vicino tenuto.
 d_fix = 0
-assert all(d_fix in sel_det_idx[s] for s in range(N_src)), \
-    "d_fix deve essere un rivelatore tenuto per tutte le sorgenti confrontate"
-fig, axs = plt.subplots(1, N_src, figsize=(3.4*N_src, 3.6))
-if N_src == 1: axs = [axs]
-for s in range(N_src):
+src_with_dfix = [s for s in range(N_src) if d_fix in sel_det_idx[s]]
+fig, axs = plt.subplots(1, len(src_with_dfix), figsize=(3.4*len(src_with_dfix), 3.6))
+axs = np.atleast_1d(axs)
+for ax, s in zip(axs, src_with_dfix):
     Wsec = np.log10(np.clip(np.abs(W_section(s, d_fix, g_fix)[:, :, iz]), 1e-8, None)).T
-    im = axs[s].imshow(Wsec, origin='lower', vmin=Wlog_vmin, vmax=Wlog_vmax,
+    im = ax.imshow(Wsec, origin='lower', vmin=Wlog_vmin, vmax=Wlog_vmax,
                 extent=(x_coords[0]-step/2, x_coords[-1]+step/2,
                         y_coords[0]-step/2, y_coords[-1]+step/2))
-    axs[s].scatter(*src_xy[s], marker='*', c='red', s=45)
-    axs[s].scatter(*det_xy[d_fix], marker='o', c='lime', s=25)
-    axs[s].set_title(f'S{s+1} attiva', fontsize=9)
+    ax.scatter(*src_xy[s], marker='*', c='red', s=45)
+    ax.scatter(*det_xy[d_fix], marker='o', c='lime', s=25)
+    ax.set_title(f'S{s+1} attiva', fontsize=9)
 fig.suptitle(f"Sensitivita' " r"$\log_{10}|W|$" f" viste dal rivelatore D{d_fix+1} al variare della sorgente attiva\n"
              f"z = {z_coords[iz]:.0f} mm, gate {g_fix} "
-             f"({gates[g_fix][0]:.1f}-{gates[g_fix][1]:.1f} ns)")
-fig.colorbar(im, ax=axs, shrink=0.8)
+             f"({gates[g_fix][0]:.1f}-{gates[g_fix][1]:.1f} ns) - "
+             f"solo le {len(src_with_dfix)} sorgenti per cui D{d_fix+1} e' un vicino tenuto")
+fig.colorbar(im, ax=list(axs), shrink=0.8)
 plt.show()
 
 
