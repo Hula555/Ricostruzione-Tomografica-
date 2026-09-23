@@ -41,6 +41,68 @@ det_xy = np.array([
 ])
 N_det = det_xy.shape[0]
 
+# --- SELEZIONE "PRIMI/SECONDI VICINI" -------------------------------------
+# Per ogni sorgente si tengono solo i rivelatori a distanza (proiezione x-y)
+# pari a quella dei primi vicini (12 mm, il passo base della griglia
+# sorgenti/rivelatori) o dei secondi vicini (12*sqrt(2) mm, la diagonale),
+# scartando le coppie a grande separazione: nella Parte 4 avevamo visto che
+# quelle coppie non portano segnale utile (gia' al livello del pavimento di
+# rumore poissoniano) e PEGGIORANO il condizionamento di W (numero di
+# condizionamento passato da 1.4e12, caso a sorgente singola, a 2.4e14
+# includendo tutte le coppie). Nota: non tutte le sorgenti hanno rivelatori
+# a entrambe le distanze (la geometria non e' invariante per rotazione di
+# 90 gradi) - alcune sorgenti mantengono quindi solo i primi vicini.
+NEIGHBOR_DISTANCES_MM = [12.0, 12.0*np.sqrt(2)]   # primi vicini, secondi vicini
+DIST_TOL = 1e-6
+
+sel_det_idx = []   # sel_det_idx[s] = indici (in det_xy) dei rivelatori tenuti per la sorgente s
+print("Selezione primi/secondi vicini per sorgente "
+      f"(distanze bersaglio: {[f'{d:.2f}' for d in NEIGHBOR_DISTANCES_MM]} mm):")
+for s in range(N_src):
+    dist_sd = np.linalg.norm(det_xy - src_xy[s], axis=1)
+    is_kept = np.any([np.isclose(dist_sd, dtgt, atol=DIST_TOL) for dtgt in NEIGHBOR_DISTANCES_MM], axis=0)
+    idx = np.flatnonzero(is_kept)
+    sel_det_idx.append(idx)
+    print(f"  S{s+1} ({src_xy[s, 0]:.1f}, {src_xy[s, 1]:.1f}): {len(idx)}/{N_det} rivelatori tenuti -> "
+          f"D{[int(i)+1 for i in idx]}")
+
+# lista delle coppie (sorgente, rivelatore) effettivamente misurate, e
+# dimensione di ciascun blocco-sorgente (puo' variare da sorgente a
+# sorgente su geometrie non simmetriche)
+meas_pairs = [(s, d) for s in range(N_src) for d in sel_det_idx[s]]
+N_pairs = len(meas_pairs)
+block_sizes = [len(idx) for idx in sel_det_idx]
+block_starts = np.concatenate(([0], np.cumsum(block_sizes)))
+pair_lookup = {pair: idx for idx, pair in enumerate(meas_pairs)}
+
+# --- plot: quali rivelatori vengono tenuti, sorgente per sorgente ---------
+fig, axs = plt.subplots(1, N_src, figsize=(3.6*N_src, 4.0), sharex=True, sharey=True)
+if N_src == 1: axs = [axs]
+for s in range(N_src):
+    dist_sd = np.linalg.norm(det_xy - src_xy[s], axis=1)
+    is_ring1 = np.isclose(dist_sd, NEIGHBOR_DISTANCES_MM[0], atol=DIST_TOL)
+    is_ring2 = np.isclose(dist_sd, NEIGHBOR_DISTANCES_MM[1], atol=DIST_TOL)
+    is_excl = ~(is_ring1 | is_ring2)
+    axs[s].scatter(det_xy[is_excl, 0], det_xy[is_excl, 1], marker='o', c='lightgray',
+                    s=45, label='escluso', zorder=2)
+    axs[s].scatter(det_xy[is_ring1, 0], det_xy[is_ring1, 1], marker='o', c='#d95f02',
+                    s=70, label=f'primi vicini ({NEIGHBOR_DISTANCES_MM[0]:.1f} mm)', zorder=3)
+    axs[s].scatter(det_xy[is_ring2, 0], det_xy[is_ring2, 1], marker='o', c='#7570b3',
+                    s=70, label=f'secondi vicini ({NEIGHBOR_DISTANCES_MM[1]:.1f} mm)', zorder=3)
+    axs[s].scatter(*src_xy[s], marker='*', c='red', s=180, zorder=4, edgecolor='k', linewidth=0.5)
+    for d in range(N_det):
+        axs[s].annotate(f'D{d+1}', det_xy[d], textcoords='offset points', xytext=(5, 5), fontsize=6)
+    axs[s].set_title(f'S{s+1}: {block_sizes[s]}/{N_det} rivelatori')
+    axs[s].set_xlabel('x [mm]')
+    axs[s].set_aspect('equal')
+    axs[s].grid(alpha=0.3)
+axs[0].set_ylabel('y [mm]')
+handles, labels = axs[0].get_legend_handles_labels()
+fig.legend(handles, labels, loc='lower center', ncol=3, fontsize=8, bbox_to_anchor=(0.5, -0.03))
+fig.suptitle('Rivelatori tenuti (primi/secondi vicini) per ciascuna sorgente')
+fig.tight_layout(rect=[0, 0.04, 1, 1])
+plt.show()
+
 # posizioni reale + immagine (metodo delle immagini, contorno estrapolato)
 # per OGNI sorgente e OGNI rivelatore
 r_s0_all = np.column_stack((src_xy, np.full(N_src, z0)))            # sorgenti reali
@@ -76,12 +138,14 @@ for g_i, (i0, i1) in enumerate(gate_indices):
         raise ValueError(f"Gate {g_i} ({gates[g_i]}) troppo stretto rispetto a dt={dt}: "
                           f"contiene solo {i1 - i0} campioni.")
 
-N_meas = N_src * N_det * N_gates
+N_meas = N_pairs * N_gates
 
 print("="*55)
 print("RICHIAMO: N_src =", N_src, "| N_det =", N_det,
       "| N_vox =", N_vox, "| N_gates =", N_gates)
-print(f"Misurazioni indipendenti: {N_meas} (= N_src x N_det x N_gates)")
+print(f"Coppie sorgente-rivelatore tenute: {N_pairs} (su {N_src*N_det} possibili)")
+print(f"Misurazioni indipendenti: {N_meas} (= N_pairs x N_gates), "
+      f"contro {N_src*N_det*N_gates} se si tenessero tutte le coppie")
 print(f"Incognite (voxel): {N_vox}")
 print(f"Gate fissi da {gate_width} ns, range {gates[0][0]:.1f}-{gates[-1][1]:.1f} ns")
 print("="*55 + "\n")
@@ -147,9 +211,11 @@ plt.grid(); plt.show()
 
 # =============================================================================
 # STEP 3 - Costruzione della matrice di sensitivita' (Jacobiano) W
-#          Ora W ha N_src*N_det*N_gates righe: ogni riga corrisponde a UNA
-#          combinazione (sorgente attiva s, rivelatore d, gate g), esattamente
-#          come nell'acquisizione reale con switch sequenziale delle sorgenti.
+#          Ora W ha N_pairs*N_gates righe (N_pairs = coppie sorgente-rivelatore
+#          "primi/secondi vicini" tenute allo Step 1): ogni riga corrisponde
+#          a UNA combinazione (sorgente attiva s, rivelatore d tenuto, gate g),
+#          esattamente come nell'acquisizione reale con switch sequenziale
+#          delle sorgenti.
 # =============================================================================
 def deltafluence_inf(mu_a0, mu_s0, t, dmu_a, V, r, r1, n=n_idx):
     """Perturbazione di fluenza (Born, I ordine) in mezzo infinito."""
@@ -165,9 +231,18 @@ def fluence_inf(mu_a0, mu_s0, n, t, r):
 W = np.zeros((N_meas, N_vox))
 tt = t[None, :]
 
-def meas_row(s, d, g):
-    """Indice di riga in W per la tripletta (sorgente s, rivelatore d, gate g)."""
-    return s*N_det*N_gates + d*N_gates + g
+def meas_row(pair_idx, g):
+    """Indice di riga in W per il gate g della coppia (sorgente, rivelatore)
+    di indice pair_idx in meas_pairs."""
+    return pair_idx*N_gates + g
+
+def W_section(s, d, g):
+    """Sezione spaziale (voxel) di W per la coppia (sorgente s, rivelatore d)
+    e il gate g, solo se quella coppia e' fra quelle tenute (altrimenti None)."""
+    pair_idx = pair_lookup.get((s, d))
+    if pair_idx is None:
+        return None
+    return W[meas_row(pair_idx, g), :].reshape(x_coords.size, y_coords.size, z_coords.size)
 
 for s in range(N_src):
     r_s0 = r_s0_all[s]
@@ -175,7 +250,7 @@ for s in range(N_src):
     r_sv  = np.linalg.norm(r_V - r_s0, axis=1)     # sorgente s reale -> ogni voxel
     r_siv = np.linalg.norm(r_V - r_si, axis=1)     # sorgente s immagine -> ogni voxel
 
-    for d in range(N_det):
+    for d in sel_det_idx[s]:
         r_vd  = np.linalg.norm(r_V - r_d0[d], axis=1)   # voxel -> rivelatore reale
         r_vdi = np.linalg.norm(r_V - r_di[d], axis=1)   # voxel -> rivelatore immagine
 
@@ -188,27 +263,27 @@ for s in range(N_src):
         r_d_si = np.linalg.norm(r_d0[d] - r_si)
         phi0_t = fluence_inf(mu_a0, mu_s0, n_idx, t, r_d_s) - fluence_inf(mu_a0, mu_s0, n_idx, t, r_d_si)
 
+        pair_idx = pair_lookup[(s, d)]
         for g, (i0, i1) in enumerate(gate_indices):
             int_dphi = np.sum(dphi_vt[:, i0:i1], axis=1) * dt
             int_phi0 = np.sum(phi0_t[i0:i1]) * dt
-            W[meas_row(s, d, g), :] = int_dphi / int_phi0
+            W[meas_row(pair_idx, g), :] = int_dphi / int_phi0
 
 print(f"Matrice W costruita: shape = {W.shape}  "
-      f"({N_src} sorgenti x {N_det} rivelatori x {N_gates} gate)")
+      f"({N_pairs} coppie sorgente-rivelatore x {N_gates} gate)")
 
-W_5d = W.reshape(N_src, N_det, N_gates, x_coords.size, y_coords.size, z_coords.size)
 Wlog_vmin, Wlog_vmax = -4, 1
 
 # --- sezioni 2D di W per UNA coppia (sorgente, rivelatore) fissata,
 #     a diverse profondita' e gate ------------------------------------------
-s_show, d_show = 0, 0
+s_show, d_show = 0, int(sel_det_idx[0][0])
 z_show = [10.0, 18.0, 30.0]
 g_show = [0, 5, 11]
 fig, axs = plt.subplots(3, 3, figsize=(10, 11))
 for r_i, zval in enumerate(z_show):
     iz = np.argmin(np.abs(z_coords - zval))
     for c_i, g in enumerate(g_show):
-        Wsec = np.log10(np.clip(np.abs(W_5d[s_show, d_show, g, :, :, iz]), 1e-8, None)).T
+        Wsec = np.log10(np.clip(np.abs(W_section(s_show, d_show, g)[:, :, iz]), 1e-8, None)).T
         im = axs[r_i, c_i].imshow(Wsec, origin='lower', vmin=Wlog_vmin, vmax=Wlog_vmax,
                 extent=(x_coords[0]-step/2, x_coords[-1]+step/2,
                         y_coords[0]-step/2, y_coords[-1]+step/2))
@@ -225,39 +300,44 @@ fig.suptitle(r'Sezioni di $\log_{10}|W|$ nello spazio voxel - '
 fig.colorbar(im, ax=axs, shrink=0.7, label=r'$\log_{10}|W|$')
 plt.show()
 
-# --- confronto fra TUTTI i rivelatori, sorgente e profondita'/gate fissati -
+# --- confronto fra i rivelatori TENUTI, sorgente e profondita'/gate fissati -
 z_fix = 18.0
 g_fix = 3
 iz = np.argmin(np.abs(z_coords - z_fix))
-n_cols = 5
-n_rows = int(np.ceil(N_det / n_cols))
+det_show = sel_det_idx[s_show]
+n_cols = min(5, len(det_show))
+n_rows = int(np.ceil(len(det_show) / n_cols))
 fig, axs = plt.subplots(n_rows, n_cols, figsize=(3.0*n_cols, 3.0*n_rows))
-axs = axs.flatten()
-for d in range(N_det):
-    Wsec = np.log10(np.clip(np.abs(W_5d[s_show, d, g_fix, :, :, iz]), 1e-8, None)).T
-    im = axs[d].imshow(Wsec, origin='lower', vmin=Wlog_vmin, vmax=Wlog_vmax,
+axs = np.atleast_1d(axs).flatten()
+for i, d in enumerate(det_show):
+    Wsec = np.log10(np.clip(np.abs(W_section(s_show, d, g_fix)[:, :, iz]), 1e-8, None)).T
+    im = axs[i].imshow(Wsec, origin='lower', vmin=Wlog_vmin, vmax=Wlog_vmax,
                 extent=(x_coords[0]-step/2, x_coords[-1]+step/2,
                         y_coords[0]-step/2, y_coords[-1]+step/2))
-    axs[d].scatter(*src_xy[s_show], marker='*', c='cyan', s=40)
-    axs[d].scatter(*det_xy[d], marker='o', c='lime', s=25)
-    axs[d].set_title(f'D{d+1}', fontsize=9)
-for extra in range(N_det, n_rows*n_cols):
+    axs[i].scatter(*src_xy[s_show], marker='*', c='cyan', s=40)
+    axs[i].scatter(*det_xy[d], marker='o', c='lime', s=25)
+    axs[i].set_title(f'D{d+1}', fontsize=9)
+for extra in range(len(det_show), n_rows*n_cols):
     axs[extra].axis('off')
-fig.suptitle(f"Sensitivita' " r"$\log_{10}|W|$" f" per ciascun rivelatore, sorgente S{s_show+1}\n"
+fig.suptitle(f"Sensitivita' " r"$\log_{10}|W|$" f" per i rivelatori tenuti (primi/secondi vicini), sorgente S{s_show+1}\n"
              f"z = {z_coords[iz]:.0f} mm, gate {g_fix} "
              f"({gates[g_fix][0]:.1f}-{gates[g_fix][1]:.1f} ns)")
 fig.colorbar(im, ax=axs, shrink=0.8)
 plt.show()
 
-# --- NUOVO: confronto fra TUTTE le sorgenti, rivelatore fissato -----------
+# --- confronto fra TUTTE le sorgenti, rivelatore fissato -------------------
 # Mostra perche' accendere sorgenti diverse aiuta: ogni sorgente "illumina"
 # il volume da un'angolazione diversa, cambiando la mappa di sensitivita'
-# vista dallo STESSO rivelatore.
+# vista dallo STESSO rivelatore. d_fix = D1 (l'origine), che per questa
+# geometria e' fra i "primi vicini" di TUTTE le sorgenti (distanza 12 mm da
+# ognuna), quindi il confronto e' sempre valido.
 d_fix = 0
+assert all(d_fix in sel_det_idx[s] for s in range(N_src)), \
+    "d_fix deve essere un rivelatore tenuto per tutte le sorgenti confrontate"
 fig, axs = plt.subplots(1, N_src, figsize=(3.4*N_src, 3.6))
 if N_src == 1: axs = [axs]
 for s in range(N_src):
-    Wsec = np.log10(np.clip(np.abs(W_5d[s, d_fix, g_fix, :, :, iz]), 1e-8, None)).T
+    Wsec = np.log10(np.clip(np.abs(W_section(s, d_fix, g_fix)[:, :, iz]), 1e-8, None)).T
     im = axs[s].imshow(Wsec, origin='lower', vmin=Wlog_vmin, vmax=Wlog_vmax,
                 extent=(x_coords[0]-step/2, x_coords[-1]+step/2,
                         y_coords[0]-step/2, y_coords[-1]+step/2))
@@ -272,11 +352,13 @@ plt.show()
 
 
 # =============================================================================
-# Helper di plotting per grandezze nello spazio delle misure (N_src x N_det x
-# N_gates), usato per M ideale/rumoroso e per i modi u_i della SVD.
+# Helper di plotting per grandezze nello spazio delle misure (N_pairs x
+# N_gates, coppie sorgente-rivelatore tenute), usato per M ideale/rumoroso
+# e per i modi u_i della SVD.
 # =============================================================================
 def plot_measurement_matrix(ax, mat2d, title, cmap='RdBu_r', vlim=None):
-    """mat2d: array (N_src*N_det, N_gates), righe raggruppate per sorgente."""
+    """mat2d: array (N_pairs, N_gates), righe raggruppate per sorgente
+    (blocchi di dimensione block_sizes[s], nell'ordine di meas_pairs)."""
     if vlim is None:
         vlim = np.nanmax(np.abs(mat2d))
     im = ax.imshow(mat2d, aspect='auto', cmap=cmap, vmin=-vlim, vmax=vlim)
@@ -284,10 +366,10 @@ def plot_measurement_matrix(ax, mat2d, title, cmap='RdBu_r', vlim=None):
     ax.set_xticklabels([f'{g[0]:.1f}-{g[1]:.1f}' for g in gates], rotation=90, fontsize=6)
     ax.set_xlabel('time gate [ns]')
     for s in range(1, N_src):
-        ax.axhline(s*N_det - 0.5, color='k', linewidth=0.8)
-    tick_pos = [s*N_det + N_det/2 - 0.5 for s in range(N_src)]
+        ax.axhline(block_starts[s] - 0.5, color='k', linewidth=0.8)
+    tick_pos = [(block_starts[s] + block_starts[s+1] - 1)/2 for s in range(N_src)]
     ax.set_yticks(tick_pos)
-    ax.set_yticklabels([f'S{s+1}\n(D1..D{N_det})' for s in range(N_src)], fontsize=7)
+    ax.set_yticklabels([f'S{s+1}\n({block_sizes[s]} det)' for s in range(N_src)], fontsize=7)
     ax.set_title(title)
     return im
 
@@ -295,18 +377,18 @@ def plot_measurement_matrix(ax, mat2d, title, cmap='RdBu_r', vlim=None):
 # =============================================================================
 # STEP 4 - Vettore delle misure M = W . A (problema diretto, senza rumore)
 # =============================================================================
-M_ideal = (W @ A).reshape(N_src, N_det, N_gates)
+M_ideal = (W @ A).reshape(N_pairs, N_gates)   # righe nell'ordine di meas_pairs
 
 print("VETTORE DELLE MISURE M = W . A (ideale, senza rumore)")
 for s in range(N_src):
     print(f"-- Sorgente S{s+1} --")
-    for d in range(N_det):
-        print(f"  D{d+1}: " + " ".join(f"{val:+.4f}" for val in M_ideal[s, d, :]))
+    for d in sel_det_idx[s]:
+        print(f"  D{d+1}: " + " ".join(f"{val:+.4f}" for val in M_ideal[pair_lookup[(s, d)], :]))
 
-fig, ax = plt.subplots(figsize=(8, 0.42*N_src*N_det + 1.5))
-plot_measurement_matrix(ax, M_ideal.reshape(N_src*N_det, N_gates),
+fig, ax = plt.subplots(figsize=(8, 0.42*N_pairs + 1.5))
+plot_measurement_matrix(ax, M_ideal,
                          'Vettore delle misure M = W . A (ideale, mezzo semi-infinito)\n'
-                         f'{N_src} sorgenti x {N_det} rivelatori, 12 gate fissi da 0.2 ns')
+                         f'{N_pairs} coppie sorgente-rivelatore (primi/secondi vicini), 12 gate fissi da 0.2 ns')
 fig.colorbar(ax.images[0], ax=ax, label='C (-)')
 plt.tight_layout(); plt.show()
 
@@ -321,21 +403,22 @@ plt.tight_layout(); plt.show()
 
 np.random.seed(42)
 
-Phi0_int = np.zeros((N_src, N_det, N_gates))
+Phi0_int = np.zeros((N_pairs, N_gates))
 for s in range(N_src):
     r_s0 = r_s0_all[s]; r_si = r_si_all[s]
-    for d in range(N_det):
+    for d in sel_det_idx[s]:
+        pair_idx = pair_lookup[(s, d)]
         r_d_s = np.linalg.norm(r_d0[d] - r_s0)
         r_d_si = np.linalg.norm(r_d0[d] - r_si)
         phi0_t = (fluence_inf(mu_a0, mu_s0, n_idx, t, r_d_s)
                   - fluence_inf(mu_a0, mu_s0, n_idx, t, r_d_si))
         for g, (i0, i1) in enumerate(gate_indices):
-            Phi0_int[s, d, g] = np.sum(phi0_t[i0:i1]) * dt
+            Phi0_int[pair_idx, g] = np.sum(phi0_t[i0:i1]) * dt
 
 # budget fotonico per ciascuna acquisizione (sorgente, rivelatore) - stesso
 # ordine di grandezza per ogni coppia, come nel caso a sorgente singola
 N_tot = 1e6
-N0_ideal = N_tot * Phi0_int / Phi0_int.sum(axis=2, keepdims=True)
+N0_ideal = N_tot * Phi0_int / Phi0_int.sum(axis=1, keepdims=True)
 Npert_ideal = N0_ideal * (1 + M_ideal)
 
 N0_noisy = np.random.poisson(N0_ideal)
@@ -351,21 +434,20 @@ print(f"Conteggi minimi/massimi di baseline per gate: "
       f"{N0_ideal.min():.1f} / {N0_ideal.max():.1f}")
 
 vmax = np.nanmax(np.abs(np.concatenate([M_ideal.ravel(), M_noisy.ravel()])))
-fig, axs = plt.subplots(1, 2, figsize=(14, 0.42*N_src*N_det + 1.5), sharey=True)
-plot_measurement_matrix(axs[0], M_ideal.reshape(N_src*N_det, N_gates),
-                         'M ideale (senza rumore)', vlim=vmax)
-plot_measurement_matrix(axs[1], M_noisy.reshape(N_src*N_det, N_gates),
-                         'M con rumore poissoniano (shot noise)', vlim=vmax)
+fig, axs = plt.subplots(1, 2, figsize=(14, 0.42*N_pairs + 1.5), sharey=True)
+plot_measurement_matrix(axs[0], M_ideal, 'M ideale (senza rumore)', vlim=vmax)
+plot_measurement_matrix(axs[1], M_noisy, 'M con rumore poissoniano (shot noise)', vlim=vmax)
 fig.colorbar(axs[1].images[0], ax=axs, shrink=0.8, label='C (-)')
 fig.suptitle(f'Confronto M ideale vs M con shot noise '
              f'(N_tot = {N_tot:.0e} conteggi/coppia sorgente-rivelatore)')
 plt.show()
 
 # --- profilo di una singola coppia (sorgente, rivelatore), gate per gate ---
-s_show2, d_show2 = 0, 0
+s_show2, d_show2 = 0, int(sel_det_idx[0][0])
+pair_show2 = pair_lookup[(s_show2, d_show2)]
 plt.figure(figsize=(7, 4))
-plt.plot(range(N_gates), M_ideal[s_show2, d_show2], 'o-', label='M ideale')
-plt.plot(range(N_gates), M_noisy[s_show2, d_show2], 's--', label='M con rumore')
+plt.plot(range(N_gates), M_ideal[pair_show2], 'o-', label='M ideale')
+plt.plot(range(N_gates), M_noisy[pair_show2], 's--', label='M con rumore')
 plt.xlabel('indice gate temporale')
 plt.ylabel('C (-)')
 plt.title(f'Sorgente S{s_show2+1}, rivelatore D{d_show2+1}: confronto ideale vs rumoroso')
@@ -393,7 +475,7 @@ plt.figure()
 plt.semilogy(np.arange(1, k_max + 1), s_sv, 'o-', ms=4)
 plt.xlabel('ordine $i$'); plt.ylabel('$s_i$')
 plt.title("Valori singolari di $W$ (scala logaritmica)\n"
-          f"{N_src} sorgenti x {N_det} rivelatori x {N_gates} gate = {N_meas} misure")
+          f"{N_pairs} coppie sorgente-rivelatore x {N_gates} gate = {N_meas} misure")
 plt.grid(); plt.show()
 
 
@@ -404,9 +486,9 @@ orders_to_show = sorted(set(min(o, k_max - 1) for o in [0, 1, 5, 20, k_max//2, k
 iz_show = np.argmin(np.abs(z_coords - zp))
 
 fig, axs = plt.subplots(len(orders_to_show), 2,
-                         figsize=(9, 0.28*N_src*N_det*len(orders_to_show) + 2*len(orders_to_show)))
+                         figsize=(9, 0.28*N_pairs*len(orders_to_show) + 2*len(orders_to_show)))
 for row, i in enumerate(orders_to_show):
-    U_img = U[:, i].reshape(N_src*N_det, N_gates)
+    U_img = U[:, i].reshape(N_pairs, N_gates)
     im = plot_measurement_matrix(axs[row, 0], U_img,
                                   f"$u_{{{i}}}$ (spazio misure) — $s_{{{i}}}$={s_sv[i]:.2e}")
 
@@ -495,7 +577,7 @@ plt.gca().invert_xaxis()   # lambda decrescente verso destra = regolarizzazione
 plt.xlabel(r'parametro di regolarizzazione $\lambda$  (regolarizzazione piu debole $\to$)')
 plt.ylabel(r'errore relativo $\|\hat A-A\|/\|A\|$')
 plt.title(f'Regolarizzazione di Tikhonov: ideale vs con rumore\n'
-          f'({N_src} sorgenti x {N_det} rivelatori x {N_gates} gate = {N_meas} misure)')
+          f'({N_pairs} coppie sorgente-rivelatore x {N_gates} gate = {N_meas} misure)')
 plt.legend(); plt.grid(which='both', alpha=0.4); plt.show()
 
 print(f"Dati ideali: errore minimo = {rel_err_ideal.min():.3f} a "
@@ -519,12 +601,17 @@ fig, axs = plt.subplots(1, len(lambda_show)+1, figsize=(4*(len(lambda_show)+1), 
 if len(lambda_show) == 0:
     axs = [axs]
 
+# solo i rivelatori EFFETTIVAMENTE usati da almeno una sorgente (unione
+# dei primi/secondi vicini) - non tutti i 13 della griglia originale
+used_det_idx = sorted(set(d for idx in sel_det_idx for d in idx))
+used_det_xy = det_xy[used_det_idx]
+
 A_section_true = A_rep[:, :, iz_show2].T
 axs[0].imshow(A_section_true, origin='lower', cmap='viridis', vmin=0, vmax=dmu_a,
               extent=(x_coords[0]-step/2, x_coords[-1]+step/2,
                       y_coords[0]-step/2, y_coords[-1]+step/2))
 axs[0].scatter(src_xy[:, 0], src_xy[:, 1], marker='*', c='red', s=90)
-axs[0].scatter(det_xy[:, 0], det_xy[:, 1], marker='o', c='cyan', s=25)
+axs[0].scatter(used_det_xy[:, 0], used_det_xy[:, 1], marker='o', c='cyan', s=25)
 axs[0].set_title('$A$ vero'); axs[0].set_xlabel('x [mm]'); axs[0].set_ylabel('y [mm]')
 
 for ax, lam in zip(axs[1:], lambda_show):
@@ -537,13 +624,14 @@ for ax, lam in zip(axs[1:], lambda_show):
                     extent=(x_coords[0]-step/2, x_coords[-1]+step/2,
                             y_coords[0]-step/2, y_coords[-1]+step/2))
     ax.scatter(src_xy[:, 0], src_xy[:, 1], marker='*', c='k', s=90)
-    ax.scatter(det_xy[:, 0], det_xy[:, 1], marker='o', c='k', s=18, alpha=0.5)
+    ax.scatter(used_det_xy[:, 0], used_det_xy[:, 1], marker='o', c='k', s=18, alpha=0.5)
     ax.set_title(f'$\\hat A$ (rumore), $\\lambda$={lam:.1e}\nerr={err_lam:.2f}')
     ax.set_xlabel('x [mm]')
     fig.colorbar(im, ax=ax, shrink=0.8)
 fig.suptitle(f"Ricostruzione Tikhonov da dati con rumore, $z\\approx${z_coords[iz_show2]:.0f} mm "
              f"(vero: $x_p$={xp:.0f}, $y_p$={yp:.0f}, $z_p$={zp:.0f} mm)\n"
-             f"{N_src} sorgenti x {N_det} rivelatori (switch sequenziale)")
+             f"{N_src} sorgenti x {len(used_det_idx)}/{N_det} rivelatori tenuti (switch sequenziale, "
+             f"{N_pairs} coppie)")
 fig.tight_layout()
 plt.show()
 
