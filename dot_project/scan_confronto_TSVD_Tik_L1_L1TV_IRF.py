@@ -1663,3 +1663,127 @@ with pd.ExcelWriter(file_risultati, engine="openpyxl", mode="a",
     confronto.to_excel(xw, sheet_name="confronto_metodi", index=False)
     riep.to_excel(xw, sheet_name="riepilogo_inclusioni", index=False)
 print(f"\nFogli 'confronto_metodi' e 'riepilogo_inclusioni' aggiunti a '{file_risultati}'.")
+
+
+# %% =============================================================
+# STIMA DEI CROMOFORI DALLO SPETTRO RICOSTRUITO (unmixing spettrale)
+# ==================================================================
+# Per ogni metodo, posizione e variazione si ha uno spettro ricostruito dmu_a(lambda),
+# cioe' l'integrale spaziale di ogni lambda diviso per il volume dell'inclusione
+# (colonna 'dmu_medio_equivalente' = V_vox sum_R A_hat / (N_voxel_incl V_vox)). Lo
+# spettro e' una combinazione lineare degli spettri specifici dei cromofori:
+#     dmu_a(lambda) = 0.1 [d_HHb eps_HHb + d_O2Hb eps_O2Hb + d_lip mua_lip + d_H2O mua_H2O]
+# (stessa formula di mua_background, [mm^-1]) e le variazioni si stimano ai minimi
+# quadrati su tutte le lambda selezionate:
+#     min_c || E c - dmu_a_ric ||^2,   E[lambda, k] = 0.1 * spettro_k(lambda)
+#   vincolo_lipide_acqua = True  -> incognite d_HHb, d_O2Hb, d_lip con d_H2O = -d_lip
+#                                   (stessa ipotesi delle variazioni simulate; 3 incognite)
+#   vincolo_lipide_acqua = False -> 4 incognite indipendenti (d_H2O libera)
+# Lambda usate: con solo_lambda_trovate = True solo quelle in cui il metodo ha 'trovato'
+# l'inclusione (criterio basato sui dati, disponibile anche con misure reali); le altre
+# hanno una stima dominata dal rumore. Servono almeno (incognite + 1) lambda.
+# NB: dividere per il volume VERO dell'inclusione e' possibile solo in simulazione; con
+# dati reali si ottengono gli integrali di concentrazione (colonne *_integrale, in
+# uM mm^3 e mm^3 per le frazioni), da dividere per un volume stimato.
+# Riga di controllo "VERO": lo stesso unmixing sullo spettro vero dmu_a_vero deve
+# restituire le variazioni simulate (verifica della base spettrale).
+vincolo_lipide_acqua = True
+solo_lambda_trovate = True
+
+
+def base_spettrale(wl, vincolo=vincolo_lipide_acqua):
+    """Matrice E (N_lambda, N_cromofori) [mm^-1 per uM o per frazione] e nomi delle
+    incognite. Con vincolo la colonna del lipide e' (mua_lip - mua_H2O)."""
+    L = spettri["Lambda"]
+    s = {k: np.interp(wl, L, spettri[k]) / 10 for k in ("HHb", "O2Hb", "Lipid", "H2O")}
+    if vincolo:
+        return np.column_stack((s["HHb"], s["O2Hb"], s["Lipid"] - s["H2O"])), \
+               ["d_HHb", "d_O2Hb", "d_lip"]
+    return np.column_stack((s["HHb"], s["O2Hb"], s["Lipid"], s["H2O"])), \
+           ["d_HHb", "d_O2Hb", "d_lip", "d_H2O"]
+
+
+def stima_cromofori(wl, dmu_ric, vincolo=vincolo_lipide_acqua, comp_bkg=composizione):
+    """Variazioni dei cromofori dallo spettro di assorbimento ricostruito.
+    wl [nm] (N,), dmu_ric [mm^-1] (N,): spettro dmu_a dell'inclusione.
+    Restituisce un dict con d_HHb, d_O2Hb [uM], d_tHb [uM], d_lip, d_H2O [-], SO2
+    dell'inclusione, residuo relativo del fit e numero di condizione della base."""
+    wl, dmu_ric = np.asarray(wl, float), np.asarray(dmu_ric, float)
+    E, nomi = base_spettrale(wl, vincolo)
+    ok = np.isfinite(dmu_ric)
+    if ok.sum() < E.shape[1] + 1:
+        return dict({n: np.nan for n in ("d_HHb", "d_O2Hb", "d_tHb", "d_lip", "d_H2O",
+                                         "SO2_incl_stimata", "residuo_relativo",
+                                         "numero_condizione")}, n_lambda_usate=int(ok.sum()))
+    c, *_ = np.linalg.lstsq(E[ok], dmu_ric[ok], rcond=None)
+    out = dict(zip(nomi, c))
+    if vincolo:
+        out["d_H2O"] = -out["d_lip"]
+    out["d_tHb"] = out["d_HHb"] + out["d_O2Hb"]
+    hhb, o2hb = comp_bkg["HHb"] + out["d_HHb"], comp_bkg["O2Hb"] + out["d_O2Hb"]
+    out["SO2_incl_stimata"] = o2hb / (hhb + o2hb) if hhb + o2hb > 0 else np.nan
+    res = E[ok] @ c - dmu_ric[ok]
+    out["residuo_relativo"] = float(np.linalg.norm(res) / np.linalg.norm(dmu_ric[ok]))
+    out["numero_condizione"] = float(np.linalg.cond(E[ok]))
+    out["n_lambda_usate"] = int(ok.sum())
+    return out
+
+
+def tabella_cromofori(df, solo_trovate=solo_lambda_trovate):
+    """Una riga per metodo x posizione x variazione (piu' la riga 'VERO' per ogni
+    posizione e variazione): variazioni stimate, vere ed errori."""
+    var_info = {v[0]: dict(d_lip=v[2], d_HHb=v[3], d_O2Hb=v[4]) for v in variazioni}
+    righe_c = []
+    for (metodo, pid, vid), g in df.groupby(["metodo", "pos_id", "var_id"]):
+        g = g.sort_values("lambda_nm")
+        sel = g["trovata"].to_numpy(bool) if solo_trovate else np.ones(len(g), bool)
+        V_incl = maschere[pid].sum() * V_vox
+        dmu_ric = np.where(sel, g["stima_grezza"].to_numpy(float) / V_incl, np.nan)
+        casi = [(metodo, dmu_ric)]
+        if metodo == METODI[0]:     # controllo: unmixing dello spettro VERO (una volta)
+            casi.append(("VERO", g["dmu_a_vero"].to_numpy(float)))
+        for nome, spettro in casi:
+            st = stima_cromofori(g["lambda_nm"].to_numpy(float), spettro)
+            vi = var_info[vid]
+            riga = dict(metodo=nome, pos_id=pid, var_id=vid, **st,
+                        d_HHb_vero=vi["d_HHb"], d_O2Hb_vero=vi["d_O2Hb"],
+                        d_tHb_vero=vi["d_HHb"] + vi["d_O2Hb"], d_lip_vero=vi["d_lip"],
+                        d_H2O_vero=-vi["d_lip"], SO2_incl_vera=comp_var[vid]["SO2"],
+                        volume_incl_mm3=V_incl)
+            for k in ("d_HHb", "d_O2Hb", "d_tHb", "d_lip", "d_H2O"):
+                riga[f"errore_{k}"] = riga[k] - riga[f"{k}_vero"]
+                riga[f"{k}_integrale"] = riga[k] * V_incl     # [uM mm^3] o [mm^3]
+            righe_c.append(riga)
+    tab = pd.DataFrame(righe_c)
+    ordine = {m: i for i, m in enumerate(("VERO",) + METODI)}
+    return tab.sort_values(["pos_id", "var_id", "metodo"],
+                           key=lambda s: s.map(ordine) if s.name == "metodo" else s
+                           ).reset_index(drop=True)
+
+
+crom = tabella_cromofori(df)
+print("\n" + "="*78)
+print("STIMA DEI CROMOFORI DALLO SPETTRO RICOSTRUITO "
+      f"({'d_H2O = -d_lip' if vincolo_lipide_acqua else '4 cromofori liberi'}; "
+      f"{'solo lambda con inclusione trovata' if solo_lambda_trovate else 'tutte le lambda'})")
+print("   d_HHb, d_O2Hb, d_tHb in uM; d_lip, d_H2O in frazione di volume; "
+      "riga VERO = unmixing dello spettro simulato")
+print("="*78)
+col_stampa = ["pos_id", "var_id", "metodo", "n_lambda_usate",
+              "d_HHb", "d_HHb_vero", "d_O2Hb", "d_O2Hb_vero", "d_tHb", "d_tHb_vero",
+              "d_lip", "d_lip_vero", "SO2_incl_stimata", "SO2_incl_vera", "residuo_relativo"]
+print(crom[col_stampa].round(3).to_string(index=False))
+# errore assoluto medio per metodo (esclusa la riga di controllo)
+err_crom = (crom[crom["metodo"] != "VERO"]
+            .assign(**{f"|errore_{k}|": lambda t, k=k: t[f"errore_{k}"].abs()
+                       for k in ("d_HHb", "d_O2Hb", "d_tHb", "d_lip")})
+            .groupby("metodo")[[f"|errore_{k}|" for k in ("d_HHb", "d_O2Hb", "d_tHb", "d_lip")]]
+            .mean())
+err_crom = per_metodo(err_crom)
+print("\nErrore assoluto medio sulle variazioni dei cromofori (uM; frazione per d_lip):")
+print(err_crom.round(3).to_string())
+with pd.ExcelWriter(file_risultati, engine="openpyxl", mode="a",
+                    if_sheet_exists="replace") as xw:
+    crom.to_excel(xw, sheet_name="cromofori", index=False)
+    err_crom.reset_index().to_excel(xw, sheet_name="errore_cromofori", index=False)
+print(f"\nFogli 'cromofori' e 'errore_cromofori' aggiunti a '{file_risultati}'.")
