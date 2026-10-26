@@ -28,10 +28,16 @@ from scipy.linalg import cho_factor, cho_solve
 #
 # PROBLEMA DIRETTO DELLA MISURA (per ogni coppia, curva non perturbata e
 # perturbata, in fotoconteggi per canale):
-#   1) fluenza (x) IRF GREZZA (con il suo fondo), IRF normalizzata ad area netta 1
+#   1) fluenza (x) IRF NETTA (senza fondo, area 1) + fondo STAZIONARIO: il fondo della
+#      IRF misurata (b_h per canale, rispetto all'area netta) e' costante nel tempo e
+#      proporzionale ai fotoni rivelati, quindi nella DTOF vale b_h int phi dt su TUTTI
+#      i canali. (Convolvere phi con la IRF grezza, come nelle versioni precedenti,
+#      trasformava il fondo in una rampa b_h sum_{m<=n} phi[m] che parte da t' = 0: nella
+#      finestra del fondo i fotoni tardivi, soprattutto quelli perturbati dai voxel
+#      profondi, non erano ancora arrivati e restava un offset spurio nei gate.)
 #   2) fondo STIMATO prima del picco: media dei conteggi per canale della curva
-#      convoluta nella finestra fondo_finestra_ns che finisce irf_fondo_prima_ns
-#      prima del picco della IRF
+#      nella finestra fondo_finestra_ns che finisce irf_fondo_prima_ns prima del
+#      picco della IRF
 #   3) fondo SOTTRATTO canale per canale; canali <= 0 posti a 0 (vincolo), gate
 #      senza conteggi esclusi (riga di W nulla, contrasto 0)
 #   4) conteggi attesi per gate = somma dei canali del gate -> lam0 e M_ideal
@@ -81,8 +87,15 @@ from scipy.linalg import cho_factor, cho_solve
 #               shrinkage della regolarizzazione (L1, L1+TV), ma dipende dalla forma di R.
 #   "integrale" somma dei valori ricostruiti nei voxel del cluster, nessun fit:
 #                   stima = V_vox sum_{j in R} A_hat_j           [mm^-1 mm^3]
-# Le due stime sono comunque salvate in ogni riga (colonne stima_fit_grezza,
-# stima_integrale_grezza, dmu_fit_regione = a); rapporto_stima usa quella scelta.
+#   "debias"    debiasing di SCALA: si tiene la forma ricostruita A_hat_R e si stima dai
+#               dati solo un fattore beta >= 0 (1 grado di liberta', nessun problema di
+#               collinearita'):
+#                   beta = (W_w,R A_hat_R)^T m_w / ||W_w,R A_hat_R||^2
+#                   stima = beta V_vox sum_{j in R} A_hat_j
+#               Toglie lo shrinkage di L1 e L1+TV senza imporre dmu_a uniforme.
+# Le tre stime sono comunque salvate in ogni riga (colonne stima_fit_grezza,
+# stima_integrale_grezza, stima_debias_grezza, dmu_fit_regione = a, beta_debias);
+# rapporto_stima usa quella scelta.
 #
 # COSA SI CONFRONTA NEL RAPPORTO stima/vero: l'assorbimento COMPLESSIVO (integrale di
 # dmu_a sul volume), non il valore di un singolo voxel.
@@ -124,8 +137,9 @@ foglio_spettri = "new"                     # NON usare "mod": colonna Lipid disa
 cartella_risultati = os.path.dirname(os.path.abspath(file_spettri))
 # Stima dell'intensita' (vedi intestazione): "fit" o "integrale"
 stima_intensita = "fit"
-if stima_intensita not in ("fit", "integrale"):
-    raise ValueError(f"stima_intensita = '{stima_intensita}' non valida: usare 'fit' o 'integrale'.")
+if stima_intensita not in ("fit", "integrale", "debias"):
+    raise ValueError(f"stima_intensita = '{stima_intensita}' non valida: usare 'fit', "
+                     f"'integrale' o 'debias'.")
 file_risultati = os.path.join(cartella_risultati,
                               f"risultati_confronto_4metodi_{stima_intensita}_IRF_"
                               f"{time.strftime('%Y%m%d_%H%M')}.xlsx")
@@ -596,8 +610,9 @@ def matrice_W(mu_a0, mu_s0, h, h_netta, info, coppia_curve=None):
     """Matrici di sensitivita' e frazioni della TPSF nei gate, sui canali dello strumento.
       W_id, frac_id   SENZA IRF: fluenza con t' = 0 nel canale di riferimento k_rif,
                       gate sugli stessi canali
-      W_irf, frac_irf CON IRF: fluenza (x) IRF grezza, fondo stimato prima del
-                      picco (media per canale) e sottratto canale per canale
+      W_irf, frac_irf CON IRF: fluenza (x) IRF netta + fondo stazionario
+                      b_h int phi dt (costante su tutti i canali), fondo stimato prima
+                      del picco (media per canale) e sottratto canale per canale
     La normalizzazione tot e' l'area di phi0 nei primi N_gates_normalizzazione gate
     (asse t'): N_tot_TPSF conteggi in quella finestra, qualunque sia N_gates."""
     gate_idx, k_rif = info["gate_idx"], info["k_rif"]
@@ -607,7 +622,10 @@ def matrice_W(mu_a0, mu_s0, h, h_netta, info, coppia_curve=None):
                                  + gate_width * N_gates_normalizzazione))
     n_c = max(gate_idx[-1][1], k_norm)                   # canali fino alla fine dell'ultimo gate
     nfft = next_fast_len(2 * n_c - 1)
-    H, Hn = rfft(h[:n_c], nfft), rfft(h_netta[:n_c], nfft)
+    Hn = rfft(h_netta[:n_c], nfft)
+    # livello di fondo della IRF normalizzata (h = h_netta + b_h): fondo per canale /
+    # area netta. Nella DTOF il fondo e' stazionario: b_h * (integrale della fluenza)
+    b_h = info["fondo"] / (info["conteggi_netti"] * dc)
     k_f = canali_fondo(info["k_picco"], n_c)
     gate_id = [(i0 - k_rif, i1 - k_rif) for i0, i1 in gate_idx]   # stessi gate sull'asse t'
     if gate_id[0][0] < 1:
@@ -644,10 +662,13 @@ def matrice_W(mu_a0, mu_s0, h, h_netta, info, coppia_curve=None):
             int_phi0 = np.sum(phi0[i0:i1]) * dc
             W_id[p*N_gates + g, :] = np.sum(dphi[:, i0:i1], axis=1) * dc / int_phi0
             frac_id[p, g] = int_phi0 / tot
-        # --- con IRF: convoluzione, stima del fondo, sottrazione canale per canale
-        conv_d = convolvi(dphi, H, nfft, n_c)
+        # --- con IRF: convoluzione con la IRF netta + fondo stazionario, stima del
+        # fondo nella finestra prima del picco, sottrazione canale per canale
+        conv0_vero = convolvi(phi0, Hn, nfft, n_c)[0]    # curva senza fondo
+        conv0 = conv0_vero + b_h * np.sum(phi0) * dc     # + fondo costante
+        # variazione: anche il fondo cambia (di b_h int dphi dt, costante nel tempo)
+        conv_d = convolvi(dphi, Hn, nfft, n_c) + b_h * dphi.sum(axis=1, keepdims=True) * dc
         conv_d -= conv_d[:, k_f].mean(axis=1, keepdims=True)
-        conv0 = convolvi(phi0, H, nfft, n_c)[0]
         b0 = conv0[k_f].mean()
         conv0_n = conv0 - b0
         # VINCOLO: dove la curva senza fondo e' <= 0 i conteggi attesi si pongono a 0
@@ -657,7 +678,6 @@ def matrice_W(mu_a0, mu_s0, h, h_netta, info, coppia_curve=None):
         n_canali_azzerati[p] = int(np.sum(~positivi[gate_idx[0][0]:gate_idx[-1][1]]))
         conv0_n = np.where(positivi, conv0_n, 0.0)
         conv_d *= positivi[None, :]
-        conv0_vero = convolvi(phi0, Hn, nfft, n_c)[0]    # solo diagnostica: IRF senza fondo
         fondo_cnt[p] = N_tot_TPSF * dc * b0 / tot
         for g, (i0, i1) in enumerate(gate_idx):
             int_phi0 = np.sum(conv0_n[i0:i1]) * dc
@@ -817,12 +837,18 @@ gamma_svd = tuple(sorted({gamma_tsvd, gamma_tik}))   # gamma per cui serve la SV
 quantile_falsi_positivi = 0.99
 soglia_minima_sigma = 2.0                     # nessuna soglia 'trovata' sotto 2 sigma
 lambda_calibrazione = (650.0, 800.0, 950.0)   # [nm] lambda usate per la calibrazione
-n_realizzazioni_rumore = 25                   # misure di solo rumore per lambda
+n_realizzazioni_rumore = 100                  # misure di solo rumore per lambda (300 in tutto:
+                                              # il quantile 0.99 su 75 campioni era ~ il massimo)
+# Calibrazione con i pesi di baseline sig0 (una SVD e una fattorizzazione ADMM per
+# lambda invece che per realizzazione): nel regime di Born sigma_dati/sigma_0 ~ 1, e su
+# misure di solo rumore M_ideal = 0. False = pesi dai dati anche nella calibrazione.
+calibrazione_veloce_sig0 = True
 soglia_trovata = {m: 3.0 for m in METODI}     # sovrascritte dalla calibrazione
 
 print("Metodi a confronto (intensita' = "
-      + ("fit di una dmu_a uniforme sul cluster, a N_R V_vox" if stima_intensita == "fit"
-         else "integrale spaziale V_vox sum_R A_hat")
+      + {"fit": "fit di una dmu_a uniforme sul cluster, a N_R V_vox",
+         "integrale": "integrale spaziale V_vox sum_R A_hat",
+         "debias": "integrale spaziale x beta (debiasing di scala sui dati)"}[stima_intensita]
       + ", confrontata con dmu x N_voxel_incl x V_vox):")
 print(f"   TSVD      gamma {gamma_tsvd}, k per discrepanza, "
       f"soglia adattiva {regola_soglia['TSVD']}")
@@ -915,22 +941,25 @@ def cerca_lam_discrepanza(risolvi, stato, sol_vuota, chi2_vuota):
             return sol_vuota, 1.0, chi2_vuota
         sol, _, chi2 = risolvi(f_se_vuota, stato)
         return sol, f_se_vuota, chi2
-    f_rif = 1.0
+    # warm start sempre dallo stato dell'ultimo f RIFIUTATO (lam piu' grande, soluzione
+    # piu' sparsa): si procede da lam grandi a lam piccoli anche nelle bisezioni,
+    # invece di ripartire dalla soluzione piu' densa di f_acc
+    f_rif, stato_rif = 1.0, stato
     for f in fattori_lam:
-        sol, stato, chi2 = risolvi(f, stato)
+        sol, stato_nuovo, chi2 = risolvi(f, stato_rif)
         if chi2 <= target:
             break
-        f_rif = f
+        f_rif, stato_rif = f, stato_nuovo
     else:
         return sol, f, chi2                 # nessun f accettato: il piu' piccolo della griglia
-    f_acc, sol_acc, chi2_acc, stato_acc = f, sol, chi2, stato
+    f_acc, sol_acc, chi2_acc = f, sol, chi2
     for _ in range(n_bisezioni_lam):
         f_mid = np.sqrt(f_rif * f_acc)
-        sol_mid, stato_mid, chi2_mid = risolvi(f_mid, stato_acc)
+        sol_mid, stato_mid, chi2_mid = risolvi(f_mid, stato_rif)
         if chi2_mid <= target:
-            f_acc, sol_acc, chi2_acc, stato_acc = f_mid, sol_mid, chi2_mid, stato_mid
+            f_acc, sol_acc, chi2_acc = f_mid, sol_mid, chi2_mid
         else:
-            f_rif = f_mid
+            f_rif, stato_rif = f_mid, stato_mid
     return sol_acc, f_acc, chi2_acc
 
 
@@ -987,7 +1016,7 @@ def admm_l1tv(lam, alpha, Wtm, stato):
         rhs = Wtm + rho_u_tv * (u - a) + D_tv.T @ (rho_z_tv * (z - b))
         x = (Minv_tv @ rhs.astype(np.float32)).astype(np.float64)
         Dx = D_tv @ x
-        u_old = u
+        u_old, z_old = u, z
         u = soft(x + a, s1)                               # passo in u (L1)
         z = soft(Dx + b, s2)                              # passo in z (TV: azzera i salti piccoli)
         a = a + x - u                                     # moltiplicatori scalati
@@ -996,7 +1025,9 @@ def admm_l1tv(lam, alpha, Wtm, stato):
         # quando la soluzione e' l'immagine vuota (x -> 0)
         scala = max(np.linalg.norm(x), scala_min_tv)
         res_primale = np.sqrt(np.sum((x - u)**2) + np.sum((Dx - z)**2))
-        if res_primale <= tol_admm * scala and np.linalg.norm(u - u_old) <= tol_admm * scala:
+        scala_z = max(np.linalg.norm(Dx), scala_min_tv)
+        if (res_primale <= tol_admm * scala and np.linalg.norm(u - u_old) <= tol_admm * scala
+                and np.linalg.norm(z - z_old) <= tol_admm * scala_z):
             break
     return u, (u, z, a, b), it
 
@@ -1049,6 +1080,7 @@ def esito(A_hat, sel, stima, vero, segnale, soglia, mask, r_true):
     return dict(trovata=trovata, segnale_sigma=float(segnale),
                 x_rec=r_bar[0] if trovata else nan, y_rec=r_bar[1] if trovata else nan,
                 z_rec=r_bar[2] if trovata else nan,
+                x_bar=float(r_bar[0]), y_bar=float(r_bar[1]),
                 z_baricentro_grezzo=float(r_bar[2]), z_picco_grezzo=float(r_V[jj][2]),
                 errore_baricentro_mm=err if trovata else nan, errore_baricentro_grezzo_mm=err,
                 errore_picco_mm=float(np.linalg.norm(r_V[jj] - r_true)) if trovata else nan,
@@ -1063,6 +1095,7 @@ def esito_vuoto(vero):
     stesse colonne di esito, inclusione non trovata, stima grezza 0, nessun voxel."""
     nan = np.nan
     return dict(trovata=False, segnale_sigma=0.0, x_rec=nan, y_rec=nan, z_rec=nan,
+                x_bar=nan, y_bar=nan,
                 z_baricentro_grezzo=nan, z_picco_grezzo=nan,
                 errore_baricentro_mm=nan, errore_baricentro_grezzo_mm=nan,
                 errore_picco_mm=nan, stima=nan, stima_grezza=0.0, valore_vero=vero,
@@ -1076,6 +1109,7 @@ def metriche_regione(A_hat, peso, m_w, mask, r_true, dmu_vero, soglia_cl, soglia
     picco. Due stime dell'assorbimento complessivo [mm^-1 mm^3]:
         fit:       a = w_R^T m_w / w_R^T w_R (dmu_a uniforme su R, dai dati), a N_R V_vox
         integrale: V_vox sum_R A_hat_j (valori ricostruiti, nessun fit)
+        debias:    beta V_vox sum_R A_hat_j, beta = scala della forma A_hat_R sui dati
     stima = quella scelta da stima_intensita; vero = dmu_vero N_voxel_incl V_vox
     (dmu_vero = dmu_a di OGNI voxel dell'inclusione).
     soglia_cl: numero (soglia fissa) o regola [(z_max, soglia), ...] (adattiva, sulla
@@ -1084,8 +1118,9 @@ def metriche_regione(A_hat, peso, m_w, mask, r_true, dmu_vero, soglia_cl, soglia
     pa = peso * A_hat
     if not np.any(pa):           # immagine vuota (lam >= lam_max): nessuna regione
         return dict(esito_vuoto(vero), soglia_usata=np.nan, z_picco_comp=np.nan,
-                    dmu_medio_equivalente=0.0, dmu_fit_regione=np.nan,
-                    stima_fit_grezza=0.0, stima_integrale_grezza=0.0)
+                    dmu_medio_equivalente=0.0, dmu_fit_regione=np.nan, beta_debias=np.nan,
+                    stima_fit_grezza=0.0, stima_integrale_grezza=0.0,
+                    stima_debias_grezza=0.0)
     j = int(np.argmax(np.abs(pa)))
     sgn = np.sign(pa[j]) if pa[j] != 0 else 1.0
     z_pk = float(r_V[j][2])                          # profondita' del picco di p|A|
@@ -1099,7 +1134,12 @@ def metriche_regione(A_hat, peso, m_w, mask, r_true, dmu_vero, soglia_cl, soglia
     a_fit = float((w_R @ m_w) / (w_R @ w_R))
     stima_fit = a_fit * regione.sum() * V_vox                        # [mm^-1 mm^3]
     stima_int = float(A_hat[regione].sum() * V_vox)                  # [mm^-1 mm^3]
-    stima = stima_fit if stima_intensita == "fit" else stima_int
+    # DEBIAS DI SCALA: stessa forma A_hat_R, ampiezza dai dati (beta >= 0)
+    firma = W_w[:, regione] @ A_hat[regione]
+    n2 = float(firma @ firma)
+    beta = max(float(firma @ m_w) / n2, 0.0) if n2 > 0 else 0.0
+    stima_deb = beta * stima_int
+    stima = {"fit": stima_fit, "integrale": stima_int, "debias": stima_deb}[stima_intensita]
     # SEGNALE PER "TROVATA" (filtro adattato): quanto i DATI somigliano alla firma
     # della regione w_R, in deviazioni standard del rumore.
     segnale = float(abs(w_R @ m_w) / np.linalg.norm(w_R))
@@ -1109,6 +1149,8 @@ def metriche_regione(A_hat, peso, m_w, mask, r_true, dmu_vero, soglia_cl, soglia
     met["dmu_fit_regione"] = a_fit           # dmu_a uniforme stimata sul cluster [mm^-1]
     met["stima_fit_grezza"] = stima_fit
     met["stima_integrale_grezza"] = stima_int
+    met["beta_debias"] = beta
+    met["stima_debias_grezza"] = stima_deb
     # valore medio per voxel equivalente: stima / volume VERO dell'inclusione,
     # direttamente confrontabile con dmu_vero (stesso rapporto stima/vero)
     met["dmu_medio_equivalente"] = stima / (mask.sum() * V_vox)
@@ -1215,9 +1257,12 @@ def salva_excel(righe, percorso):
                                        + f" sigma (quantile {quantile_falsi_positivi} del solo rumore)",
                                        "regione connessa al picco di p|A| (>= soglia del picco); "
                                        "p = max(||w_j||, 1/dmu_a_max)^gamma; stima per tutti i metodi: "
-                                       + ("fit, a = w_R^T m_w / w_R^T w_R (dmu_a uniforme sul cluster) "
-                                          "x N_R V_vox" if stima_intensita == "fit" else
-                                          "integrale spaziale V_vox sum_R A_hat (nessun fit)")
+                                       + {"fit": "fit, a = w_R^T m_w / w_R^T w_R (dmu_a uniforme "
+                                                 "sul cluster) x N_R V_vox",
+                                          "integrale": "integrale spaziale V_vox sum_R A_hat "
+                                                       "(nessun fit)",
+                                          "debias": "beta V_vox sum_R A_hat, beta = (W_R A_R)^T m_w"
+                                                    " / ||W_R A_R||^2"}[stima_intensita]
                                        + "; vero = "
                                        "dmu x N_voxel_incl x V_vox (dmu = valore di ogni voxel "
                                        "dell'inclusione)"]})
@@ -1283,6 +1328,10 @@ def prepara_lambda(mu_a0, mu_s0, wl, coppia_curve=None):
     # Gate senza conteggi attesi (tutti i canali posti a 0 dal vincolo): riga di W
     # nulla e misura neutra (M = 0, vedi misura_valida), cioe' gate escluso di fatto.
     gate_validi = (frac_gates > 0).flatten()
+    # anche con inversione_con_irf = False (W_id ha quelle righe non nulle): altrimenti
+    # l'inversione cercherebbe W A = 0 nei gate esclusi
+    W = W.copy()
+    W[~gate_validi, :] = 0.0
     if not gate_validi.all():
         print(f"   {wl:.0f} nm: {np.sum(~gate_validi)} gate su {N_meas} senza conteggi attesi "
               f"dopo la sottrazione del fondo (posti a 0, esclusi): coppie "
@@ -1404,10 +1453,12 @@ def calibra_soglie():
     for wl_c in lambda_calibrazione:
         i = int(np.argmin(np.abs(wl_nm - wl_c)))
         prepara_lambda(float(mu_a_bkg[i]), float(mu_s_bkg[i]), wl_nm[i])
+        if calibrazione_veloce_sig0 and modello_sigma == "dati":
+            prepara_pesi(sig0)
         for _ in range(n_realizzazioni_rumore):
             M0, sig_hat = simula_misura(lam0, np.zeros_like(lam0), rng_cal)
             M0 = misura_valida(M0)
-            sig = pesi_misura(sig_hat.flatten())
+            sig = sig0 if calibrazione_veloce_sig0 else pesi_misura(sig_hat.flatten())
             m_w = M0.flatten() / sig
             for metodo, *_, met in tutte_le_stime(
                     ricostruisci_tutto(m_w), m_w, maschere[pid0], np.zeros(3), 0.0):
@@ -1640,7 +1691,12 @@ print(f"\nRapporto mediano sigma stimata dai dati / sigma_0 di baseline: "
 # da 'trovata'), SNR >= 20
 r = ril["rapporto_stima_grezzo"]
 ril["entro_20"] = (r - 1).abs() <= 0.2
-ril["abs_ln_r"] = np.where(r > 0, np.abs(np.log(r.where(r > 0))), np.nan)
+# segno sbagliato o stima nulla (r <= 0) NON vanno scartati (la mediana ignorerebbe i NaN
+# e premierebbe i metodi che falliscono): ricevono la penalita' massima ln(10), cioe'
+# "errore di un fattore >= 10"; anche |ln r| e' limitato a ln(10)
+abs_ln_r_max = np.log(10)
+ril["abs_ln_r"] = np.where(r > 0, np.minimum(np.abs(np.log(r.where(r > 0))), abs_ln_r_max),
+                           abs_ln_r_max)
 ril["segno_ok"] = r > 0
 riep = (ril.groupby(["metodo", "pos_id", "var_id"])
         .agg(n_lambda=("rapporto_stima_grezzo", "size"),
@@ -1679,7 +1735,8 @@ confronto = per_metodo(confronto).reset_index()
 
 print("\n" + "="*78)
 print("CONFRONTO FRA I QUATTRO METODI (versione migliore di ciascuno)")
-print("   abs_ln_r: |ln(stima/vero)| (0 = stima esatta; 0.18 = +-20%), media sulle inclusioni")
+print("   abs_ln_r: |ln(stima/vero)| (0 = stima esatta; 0.18 = +-20%; segno sbagliato o stima "
+      "nulla = ln(10) = 2.30), media sulle inclusioni")
 print("="*78)
 print(confronto.round(3).to_string(index=False))
 print("\nRapporto mediano stima/vero GREZZO per inclusione (SNR atteso >= 20):")
@@ -1717,8 +1774,14 @@ print(f"\nFogli 'confronto_metodi' e 'riepilogo_inclusioni' aggiunti a '{file_ri
 # uM mm^3 e mm^3 per le frazioni), da dividere per un volume stimato.
 # Riga di controllo "VERO": lo stesso unmixing sullo spettro vero dmu_a_vero deve
 # restituire le variazioni simulate (verifica della base spettrale).
+# Coerenza spaziale: il cluster e' cercato in modo indipendente a ogni lambda e a basso
+# SNR puo' saltare su un artefatto lontano. Si escludono le lambda il cui baricentro
+# dista piu' di tol_coerenza_mm dalla posizione di riferimento (mediana dei baricentri
+# della meta' delle lambda con segnale_sigma piu' alto: criterio basato sui dati).
+# None = nessun controllo.
 vincolo_lipide_acqua = True
 solo_lambda_trovate = True
+tol_coerenza_mm = 8.0
 
 
 def base_spettrale(wl, vincolo=vincolo_lipide_acqua):
@@ -1767,6 +1830,16 @@ def tabella_cromofori(df, solo_trovate=solo_lambda_trovate):
     for (metodo, pid, vid), g in df.groupby(["metodo", "pos_id", "var_id"]):
         g = g.sort_values("lambda_nm")
         sel = g["trovata"].to_numpy(bool) if solo_trovate else np.ones(len(g), bool)
+        # coerenza spaziale fra le lambda (baricentri grezzi: definiti anche se non trovata)
+        n_scartate = 0
+        if tol_coerenza_mm is not None and sel.sum() >= 2:
+            xyz = g[["x_bar", "y_bar", "z_baricentro_grezzo"]].to_numpy(float)
+            seg = g["segnale_sigma"].to_numpy(float)
+            forti = sel & (seg >= np.median(seg[sel]))
+            r_ref = np.nanmedian(xyz[forti], axis=0)
+            lontane = np.linalg.norm(xyz - r_ref, axis=1) > tol_coerenza_mm
+            n_scartate = int((sel & lontane).sum())
+            sel = sel & ~lontane
         V_incl = maschere[pid].sum() * V_vox
         dmu_ric = np.where(sel, g["stima_grezza"].to_numpy(float) / V_incl, np.nan)
         casi = [(metodo, dmu_ric)]
@@ -1776,6 +1849,7 @@ def tabella_cromofori(df, solo_trovate=solo_lambda_trovate):
             st = stima_cromofori(g["lambda_nm"].to_numpy(float), spettro)
             vi = var_info[vid]
             riga = dict(metodo=nome, pos_id=pid, var_id=vid, **st,
+                        lambda_scartate_coerenza=n_scartate if nome != "VERO" else 0,
                         d_HHb_vero=vi["d_HHb"], d_O2Hb_vero=vi["d_O2Hb"],
                         d_tHb_vero=vi["d_HHb"] + vi["d_O2Hb"], d_lip_vero=vi["d_lip"],
                         d_H2O_vero=-vi["d_lip"], SO2_incl_vera=comp_var[vid]["SO2"],
@@ -1795,11 +1869,12 @@ crom = tabella_cromofori(df)
 print("\n" + "="*78)
 print("STIMA DEI CROMOFORI DALLO SPETTRO RICOSTRUITO "
       f"({'d_H2O = -d_lip' if vincolo_lipide_acqua else '4 cromofori liberi'}; "
-      f"{'solo lambda con inclusione trovata' if solo_lambda_trovate else 'tutte le lambda'})")
+      f"{'solo lambda con inclusione trovata' if solo_lambda_trovate else 'tutte le lambda'}"
+      + (f", coerenti entro {tol_coerenza_mm:g} mm" if tol_coerenza_mm is not None else "") + ")")
 print("   d_HHb, d_O2Hb, d_tHb in uM; d_lip, d_H2O in frazione di volume; "
       "riga VERO = unmixing dello spettro simulato")
 print("="*78)
-col_stampa = ["pos_id", "var_id", "metodo", "n_lambda_usate",
+col_stampa = ["pos_id", "var_id", "metodo", "n_lambda_usate", "lambda_scartate_coerenza",
               "d_HHb", "d_HHb_vero", "d_O2Hb", "d_O2Hb_vero", "d_tHb", "d_tHb_vero",
               "d_lip", "d_lip_vero", "SO2_incl_stimata", "SO2_incl_vera", "residuo_relativo"]
 print(crom[col_stampa].round(3).to_string(index=False))
