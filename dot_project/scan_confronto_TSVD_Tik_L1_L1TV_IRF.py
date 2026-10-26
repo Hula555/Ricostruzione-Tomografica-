@@ -50,15 +50,14 @@ from scipy.linalg import cho_factor, cho_solve
 #
 # I QUATTRO METODI (versione migliore di ciascuno, dagli scan precedenti):
 #   TSVD      gamma = 0.5; k per discrepanza: il piu' piccolo k con chi^2 <= N_validi.
-#             Stima: SOMMA delle dmu_a ricostruite sulla regione (integrale_adattivo),
-#             soglia della regione ADATTIVA: 0.25 se z_picco <= 10 mm, 0.30 oltre
+#             Soglia della regione ADATTIVA: 0.25 se z_picco <= 10 mm, 0.30 oltre
 #             (scan del 13-14/10).
 #   Tikhonov  gamma = 0.6; min ||W_w A - m_w||^2 + lam^2 ||diag(p) A||^2, lam per
-#             discrepanza (chi^2 = N_validi, bisezione in log(lam)). Stima: SOMMA sulla
-#             regione, soglia ADATTIVA 0.22 se z_picco <= 10 mm, 0.28 oltre.
+#             discrepanza (chi^2 = N_validi, bisezione in log(lam)). Soglia della
+#             regione ADATTIVA 0.22 se z_picco <= 10 mm, 0.28 oltre.
 #   L1        gamma = 1.0; min_x 1/2 ||B x - m_w||^2 + lam ||x||_1 (FISTA, passo
 #             1/||B||^2); lam per discrepanza, chi^2 = N_validi + 2 sqrt(2 N_validi), con
-#             griglia + bisezioni. Stima: SOMMA sulla regione, soglia 0.20.
+#             griglia + bisezioni. Soglia della regione 0.20.
 #   L1+TV     alpha = 0.95 (ADMM):
 #                 min_x 1/2 ||W_w x - m_w||^2 + lam [alpha sum_j p_j |x_j|
 #                                                     + (1-alpha) sum_e q_e |(D x)_e|]
@@ -67,16 +66,23 @@ from scipy.linalg import cho_factor, cho_solve
 #             L* = 6 (1-alpha)/alpha = 0.32 voxel. ADMM con u = copia di x (L1) e z = copia
 #             di D x (TV), penalita' rho_u = c p^2, rho_z = c q^2, Minv = (W_w^T W_w +
 #             diag(rho_u) + D^T diag(rho_z) D)^-1 una volta per W_w. lam come la L1.
-#             Stima: SOMMA sulla regione, soglia 0.20.
+#             Soglia della regione 0.20.
 #
-# STIMA DELL'INTENSITA' = INTEGRALE SPAZIALE, uguale per i quattro metodi. Regione
+# STIMA DELL'INTENSITA' (parametro stima_intensita, uguale per i quattro metodi). Regione
 # R (il "cluster") = voxel connessi (26-vicinato) al picco di p_j |A_j| con p_j |A_j| >=
-# soglia del picco e stesso segno (z_picco_comp = z di quel picco). L'intensita' totale
-# di assorbimento e' la SOMMA dei valori ricostruiti nei voxel del cluster:
-#     stima = V_vox sum_{j in R} A_hat_j                       [mm^-1 mm^3]
-# Nessun fit sui dati: il metodo di ricostruzione da' sia la posizione sia l'intensita'
-# (un fit a posteriori sulla regione, come nelle versioni precedenti, e' instabile e
-# sensibile agli outlier). Nessuna ipotesi di omogeneita' nel cluster.
+# soglia del picco e stesso segno (z_picco_comp = z di quel picco).
+#   "fit"       (default) il metodo di ricostruzione serve SOLO a trovare il cluster R;
+#               poi si torna ai dati e si stima una sola dmu_a, uniforme su R, ai minimi
+#               quadrati pesati:
+#                   a = argmin ||a w_R - m_w||^2 = w_R^T m_w / w_R^T w_R,
+#                   w_R = sum_{j in R} w_j   (risposta dei dati a dmu_a = 1 su tutto R)
+#                   stima = a N_R V_vox                          [mm^-1 mm^3]
+#               Ipotesi: dmu_a omogenea nel cluster e cluster corretto. Toglie lo
+#               shrinkage della regolarizzazione (L1, L1+TV), ma dipende dalla forma di R.
+#   "integrale" somma dei valori ricostruiti nei voxel del cluster, nessun fit:
+#                   stima = V_vox sum_{j in R} A_hat_j           [mm^-1 mm^3]
+# Le due stime sono comunque salvate in ogni riga (colonne stima_fit_grezza,
+# stima_integrale_grezza, dmu_fit_regione = a); rapporto_stima usa quella scelta.
 #
 # COSA SI CONFRONTA NEL RAPPORTO stima/vero: l'assorbimento COMPLESSIVO (integrale di
 # dmu_a sul volume), non il valore di un singolo voxel.
@@ -86,8 +92,9 @@ from scipy.linalg import cho_factor, cho_solve
 #   - Ricostruzione: la sfocatura distribuisce l'assorbimento su un cluster che di solito
 #     ha piu' (TSVD/Tikhonov, decine di voxel) o meno (L1) voxel dell'inclusione, con
 #     valori per voxel piu' bassi o piu' alti del vero; l'integrale e' la grandezza che
-#     la sfocatura conserva, mentre la media per voxel dipenderebbe dalla dimensione del
-#     cluster. rapporto_stima = 1 significa sum_R A_hat = 8 dmu.
+#     la sfocatura conserva, mentre il valore per voxel dipende dalla dimensione del
+#     cluster (col fit: a ~ 8 dmu / N_R se il cluster ha N_R voxel invece di 8).
+#     rapporto_stima = 1 significa: assorbimento complessivo stimato = 8 dmu V_vox.
 #   Il valore medio per voxel equivalente (stima / (N_voxel_incl V_vox), da confrontare
 #   con dmu) ha lo stesso rapporto ed e' nella colonna 'dmu_medio_equivalente'.
 #
@@ -115,8 +122,13 @@ foglio_spettri = "new"                     # NON usare "mod": colonna Lipid disa
 # script. Per evitarlo il file va nella stessa cartella del file degli spettri,
 # con data e ora nel nome (nessuna sovrascrittura dei risultati precedenti).
 cartella_risultati = os.path.dirname(os.path.abspath(file_spettri))
+# Stima dell'intensita' (vedi intestazione): "fit" o "integrale"
+stima_intensita = "fit"
+if stima_intensita not in ("fit", "integrale"):
+    raise ValueError(f"stima_intensita = '{stima_intensita}' non valida: usare 'fit' o 'integrale'.")
 file_risultati = os.path.join(cartella_risultati,
-                              f"risultati_confronto_4metodi_IRF_{time.strftime('%Y%m%d_%H%M')}.xlsx")
+                              f"risultati_confronto_4metodi_{stima_intensita}_IRF_"
+                              f"{time.strftime('%Y%m%d_%H%M')}.xlsx")
 
 composizione = {
     "HHb":   10.0,    # [uM]  emoglobina deossigenata
@@ -787,14 +799,16 @@ if not 0 < alpha_tv <= 1:
 
 # --- tabella dei metodi ----------------------------------------------------------------
 # (metodo, versione, tipo, gamma, soglia della regione (numero o regola));
-# stima per tutti: integrale spaziale V_vox sum_R A_hat
+# stima per tutti secondo stima_intensita ("fit" o "integrale")
 METODI_DEF = [
-    ("TSVD", f"integrale_adattivo_g{gamma_tsvd:g}", "integrale_adattivo", gamma_tsvd,
-     regola_soglia["TSVD"]),
-    ("Tikhonov", f"integrale_adattivo_g{gamma_tik:g}", "integrale_adattivo", gamma_tik,
-     regola_soglia["Tikhonov"]),
-    ("L1", f"integrale_g{gamma_L1:g}_s{soglia_L1:g}", "integrale", gamma_L1, soglia_L1),
-    ("L1TV", f"integrale_a{alpha_tv:g}_s{soglia_L1TV:g}", "integrale", 1.0, soglia_L1TV),
+    ("TSVD", f"{stima_intensita}_adattivo_g{gamma_tsvd:g}", f"{stima_intensita}_adattivo",
+     gamma_tsvd, regola_soglia["TSVD"]),
+    ("Tikhonov", f"{stima_intensita}_adattivo_g{gamma_tik:g}", f"{stima_intensita}_adattivo",
+     gamma_tik, regola_soglia["Tikhonov"]),
+    ("L1", f"{stima_intensita}_g{gamma_L1:g}_s{soglia_L1:g}", stima_intensita, gamma_L1,
+     soglia_L1),
+    ("L1TV", f"{stima_intensita}_a{alpha_tv:g}_s{soglia_L1TV:g}", stima_intensita, 1.0,
+     soglia_L1TV),
 ]
 METODI = tuple(m[0] for m in METODI_DEF)
 gamma_svd = tuple(sorted({gamma_tsvd, gamma_tik}))   # gamma per cui serve la SVD
@@ -806,15 +820,17 @@ lambda_calibrazione = (650.0, 800.0, 950.0)   # [nm] lambda usate per la calibra
 n_realizzazioni_rumore = 25                   # misure di solo rumore per lambda
 soglia_trovata = {m: 3.0 for m in METODI}     # sovrascritte dalla calibrazione
 
-print("Metodi a confronto (intensita' = integrale spaziale V_vox sum_R A_hat, confrontato "
-      "con dmu x N_voxel_incl x V_vox):")
-print(f"   TSVD      gamma {gamma_tsvd}, k per discrepanza, somma sulla regione, "
+print("Metodi a confronto (intensita' = "
+      + ("fit di una dmu_a uniforme sul cluster, a N_R V_vox" if stima_intensita == "fit"
+         else "integrale spaziale V_vox sum_R A_hat")
+      + ", confrontata con dmu x N_voxel_incl x V_vox):")
+print(f"   TSVD      gamma {gamma_tsvd}, k per discrepanza, "
       f"soglia adattiva {regola_soglia['TSVD']}")
-print(f"   Tikhonov  gamma {gamma_tik}, lam per discrepanza, somma sulla regione, "
+print(f"   Tikhonov  gamma {gamma_tik}, lam per discrepanza, "
       f"soglia adattiva {regola_soglia['Tikhonov']}")
-print(f"   L1        gamma {gamma_L1}, FISTA, somma sulla regione, soglia {soglia_L1}")
+print(f"   L1        gamma {gamma_L1}, FISTA, soglia {soglia_L1}")
 print(f"   L1TV      alpha {alpha_tv} (L* = {6*(1-alpha_tv)/alpha_tv:.2f} voxel), ADMM, "
-      f"somma sulla regione, soglia {soglia_L1TV}\n")
+      f"soglia {soglia_L1TV}\n")
 
 
 # %% =============================================================
@@ -1054,11 +1070,13 @@ def esito_vuoto(vero):
                 segno_corretto=False, dmu_picco=0.0, voxel_regione=0, voxel_in_comune=0)
 
 def metriche_regione(A_hat, peso, m_w, mask, r_true, dmu_vero, soglia_cl, soglia=np.inf):
-    """Integrale spaziale sulla regione connessa al picco (il cluster). Picco e regione
-    si scelgono sull'immagine pesata peso*A_hat (peso = p_j della ricostruzione
+    """Intensita' sulla regione connessa al picco (il cluster). Picco e regione si
+    scelgono sull'immagine pesata peso*A_hat (peso = p_j della ricostruzione
     compensata): voxel con peso*A_hat >= soglia_cl del picco, stesso segno, connessi al
-    picco. Si SOMMANO i valori ricostruiti A_hat dei voxel del cluster (nessun fit):
-        stima = V_vox sum_R A_hat_j,   vero = dmu_vero N_voxel_incl V_vox
+    picco. Due stime dell'assorbimento complessivo [mm^-1 mm^3]:
+        fit:       a = w_R^T m_w / w_R^T w_R (dmu_a uniforme su R, dai dati), a N_R V_vox
+        integrale: V_vox sum_R A_hat_j (valori ricostruiti, nessun fit)
+    stima = quella scelta da stima_intensita; vero = dmu_vero N_voxel_incl V_vox
     (dmu_vero = dmu_a di OGNI voxel dell'inclusione).
     soglia_cl: numero (soglia fissa) o regola [(z_max, soglia), ...] (adattiva, sulla
     profondita' del picco di p|A|)."""
@@ -1066,7 +1084,8 @@ def metriche_regione(A_hat, peso, m_w, mask, r_true, dmu_vero, soglia_cl, soglia
     pa = peso * A_hat
     if not np.any(pa):           # immagine vuota (lam >= lam_max): nessuna regione
         return dict(esito_vuoto(vero), soglia_usata=np.nan, z_picco_comp=np.nan,
-                    dmu_medio_equivalente=0.0)
+                    dmu_medio_equivalente=0.0, dmu_fit_regione=np.nan,
+                    stima_fit_grezza=0.0, stima_integrale_grezza=0.0)
     j = int(np.argmax(np.abs(pa)))
     sgn = np.sign(pa[j]) if pa[j] != 0 else 1.0
     z_pk = float(r_V[j][2])                          # profondita' del picco di p|A|
@@ -1074,17 +1093,25 @@ def metriche_regione(A_hat, peso, m_w, mask, r_true, dmu_vero, soglia_cl, soglia
         soglia_cl = next(sv for zm, sv in soglia_cl if z_pk <= zm)
     candidati = sgn * pa >= soglia_cl * np.abs(pa[j])
     regione = regione_connessa(candidati, j)
-    integrale = float(A_hat[regione].sum() * V_vox)   # [mm^-1 mm^3]
     w_R = W_w[:, regione].sum(axis=1)                # firma della regione nei dati
+    # FIT: dmu_a uniforme su R che meglio spiega i dati pesati (gate esclusi: riga di
+    # W_w nulla e m_w = 0, non contano)
+    a_fit = float((w_R @ m_w) / (w_R @ w_R))
+    stima_fit = a_fit * regione.sum() * V_vox                        # [mm^-1 mm^3]
+    stima_int = float(A_hat[regione].sum() * V_vox)                  # [mm^-1 mm^3]
+    stima = stima_fit if stima_intensita == "fit" else stima_int
     # SEGNALE PER "TROVATA" (filtro adattato): quanto i DATI somigliano alla firma
     # della regione w_R, in deviazioni standard del rumore.
     segnale = float(abs(w_R @ m_w) / np.linalg.norm(w_R))
-    met = esito(A_hat, regione, integrale, vero, segnale, soglia, mask, r_true)
+    met = esito(A_hat, regione, stima, vero, segnale, soglia, mask, r_true)
     met["soglia_usata"] = float(soglia_cl)
     met["z_picco_comp"] = z_pk
-    # valore medio per voxel equivalente: integrale / volume VERO dell'inclusione,
+    met["dmu_fit_regione"] = a_fit           # dmu_a uniforme stimata sul cluster [mm^-1]
+    met["stima_fit_grezza"] = stima_fit
+    met["stima_integrale_grezza"] = stima_int
+    # valore medio per voxel equivalente: stima / volume VERO dell'inclusione,
     # direttamente confrontabile con dmu_vero (stesso rapporto stima/vero)
-    met["dmu_medio_equivalente"] = integrale / (mask.sum() * V_vox)
+    met["dmu_medio_equivalente"] = stima / (mask.sum() * V_vox)
     return met
 
 
@@ -1168,27 +1195,30 @@ def salva_excel(righe, percorso):
                                        f"{Nx}x{Ny}x{Nz}, lato {step} mm",
                                        f"{dmu_a_max}",
                                        f"gamma {gamma_tsvd}; k per discrepanza (chi^2 <= N_validi); "
-                                       f"somma sulla regione, soglia adattiva {regola_soglia['TSVD']}",
+                                       f"soglia adattiva {regola_soglia['TSVD']}",
                                        f"gamma {gamma_tik}; lam per discrepanza (chi^2 = N_validi); "
-                                       f"somma sulla regione, soglia adattiva {regola_soglia['Tikhonov']}",
+                                       f"soglia adattiva {regola_soglia['Tikhonov']}",
                                        f"gamma {gamma_L1}; lam per discrepanza: chi^2 = N_validi + "
                                        f"2 sqrt(2 N_validi); partenza da lam/lam_max = 1; se gia' "
                                        f"compatibile con i dati: f = {f_se_vuota}; griglia "
                                        f"{fattori_lam} + {n_bisezioni_lam} bisezioni; tol {tol_fista}, "
-                                       f"max {n_iter_max} iterazioni; somma sulla regione, soglia "
+                                       f"max {n_iter_max} iterazioni; soglia "
                                        f"{soglia_L1}",
                                        f"min 1/2||W_w x - m||^2 + lam[alpha sum p|x| + (1-alpha) sum "
                                        f"q|Dx|], p = max(||w_j||, 1/dmu_a_max), q = sqrt(p_i p_k); "
                                        f"alpha {alpha_tv}; rho = {rho_rel_tv} p^2, q^2; tol {tol_admm}, "
                                        f"max {n_iter_admm} iterazioni per lam; lam come la L1; "
-                                       f"somma sulla regione, soglia {soglia_L1TV}",
+                                       f"soglia {soglia_L1TV}",
                                        seme_rumore, modello_sigma, testo_pesi,
                                        "trovata se il segnale della regione >= soglia: " + ", ".join(
                                            f"{m} {s:.2f}" for m, s in soglia_trovata.items())
                                        + f" sigma (quantile {quantile_falsi_positivi} del solo rumore)",
                                        "regione connessa al picco di p|A| (>= soglia del picco); "
-                                       "p = max(||w_j||, 1/dmu_a_max)^gamma; stima = V_vox sum_R A_hat "
-                                       "(integrale spaziale, nessun fit) per tutti i metodi; vero = "
+                                       "p = max(||w_j||, 1/dmu_a_max)^gamma; stima per tutti i metodi: "
+                                       + ("fit, a = w_R^T m_w / w_R^T w_R (dmu_a uniforme sul cluster) "
+                                          "x N_R V_vox" if stima_intensita == "fit" else
+                                          "integrale spaziale V_vox sum_R A_hat (nessun fit)")
+                                       + "; vero = "
                                        "dmu x N_voxel_incl x V_vox (dmu = valore di ogni voxel "
                                        "dell'inclusione)"]})
     with pd.ExcelWriter(percorso, engine="openpyxl") as xw:
