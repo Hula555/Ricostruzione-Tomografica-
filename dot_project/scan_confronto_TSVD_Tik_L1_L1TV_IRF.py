@@ -779,6 +779,13 @@ def chi2_bersaglio():
 # Compensazione di profondita': p_j = max(||w_j||, 1/dmu_a_max)^gamma. Il minimo
 # 1/dmu_a_max evita di amplificare senza limite i voxel non osservabili.
 dmu_a_max = 0.05      # [mm^-1]
+# Taglio della base SVD di TSVD/Tikhonov: si tengono solo i modi con s_i/s_0 >= tol_sv.
+# A epsilon macchina (default) la base include modi con s_i minuscoli: ad alto SNR la
+# discrepanza ne tiene molti e c_i/s_i amplifica il rumore (posizione che "esplode",
+# intensita' sovrastimata). tol_sv limita il condizionamento a 1/tol_sv: la posizione
+# resta stabile; se il segnale cade su modi tagliati l'intensita' e' sottostimata (meglio
+# di una posizione sbagliata). 1e-3 -> amplificazione max 1000x.
+tol_sv = 1e-2
 
 # --- TSVD e Tikhonov (configurazione ottimale degli scan del 13-14/10) ---------------
 # gamma <= 0.4 sottostima in profondita' (P3 -20/-40%), gamma >= 0.7 sovrastima (P2-P3
@@ -1384,7 +1391,7 @@ def prepara_pesi(sig):
         U, s, Vt = np.linalg.svd(W_w / p, full_matrices=False)
         # solo i modi con s_i > 0: le righe nulle dei gate esclusi danno s_i = 0 e
         # dividerebbero per zero se la discrepanza non si raggiunge prima
-        k_pos = int(np.sum(s > s[0] * np.finfo(float).eps * max(W_w.shape)))
+        k_pos = int(np.sum(s >= s[0] * tol_sv))     # taglio al condizionamento 1/tol_sv
         svd_comp[g] = (p, U[:, :k_pos], s[:k_pos], Vt[:k_pos])
         t_svd[g] = time.perf_counter() - t0
     tempi_prep["TSVD"], tempi_prep["Tikhonov"] = t_svd[gamma_tsvd], t_svd[gamma_tik]
