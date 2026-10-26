@@ -10,9 +10,9 @@ from scipy import ndimage
 import scipy.sparse as sp
 from scipy.linalg import cho_factor, cho_solve
 
-# CONFRONTO FRA LE VERSIONI MIGLIORI DI QUATTRO METODI DI RICOSTRUZIONE, CON IRF MISURATA:
-#   TSVD, Tikhonov, L1 (FISTA) e L1 + variazione totale (L1+TV, ADMM),
-# applicati agli STESSI dati simulati (stessa misura rumorosa per tutti i metodi).
+# CONFRONTO FRA DUE METODI DI RICOSTRUZIONE SPARSA, CON IRF MISURATA:
+#   L1 (FISTA) e L1 + variazione totale (L1+TV, ADMM),
+# applicati agli STESSI dati simulati (stessa misura rumorosa per entrambi i metodi).
 #
 # Problema diretto, rumore, gate, pesi e calibrazione sono quelli dello scan L1/L1+TV:
 # fluenza (x) IRF, fondo stimato e sottratto, vincolo a 0, rumore simula_misura (con il
@@ -49,18 +49,12 @@ from scipy.linalg import cho_factor, cho_solve
 # misura ("inverse crime": caso ottimistico); inversione_con_irf = False usa la W
 # senza IRF. misura_con_irf = False rigenera il caso senza IRF.
 #
-# COMPENSAZIONE DI PROFONDITA' (comune ai quattro metodi): incognita x_j = p_j A_j,
+# COMPENSAZIONE DI PROFONDITA' (comune ai due metodi): incognita x_j = p_j A_j,
 #     p_j = max(||w_j||, 1/dmu_a_max)^gamma,   B = W_w diag(1/p),   A_j = x_j / p_j
 # (w_j = colonna j di W_w = W / sigma). Senza compensazione la regolarizzazione
 # preferisce i voxel superficiali (piu' sensibili).
 #
-# I QUATTRO METODI (versione migliore di ciascuno, dagli scan precedenti):
-#   TSVD      gamma = 0.5; k per discrepanza: il piu' piccolo k con chi^2 <= N_validi.
-#             Soglia della regione ADATTIVA: 0.25 se z_picco <= 10 mm, 0.30 oltre
-#             (scan del 13-14/10).
-#   Tikhonov  gamma = 0.6; min ||W_w A - m_w||^2 + lam^2 ||diag(p) A||^2, lam per
-#             discrepanza (chi^2 = N_validi, bisezione in log(lam)). Soglia della
-#             regione ADATTIVA 0.22 se z_picco <= 10 mm, 0.28 oltre.
+# I DUE METODI (versione migliore di ciascuno, dagli scan precedenti):
 #   L1        gamma = 1.0; min_x 1/2 ||B x - m_w||^2 + lam ||x||_1 (FISTA, passo
 #             1/||B||^2); lam per discrepanza, chi^2 = N_validi + 2 sqrt(2 N_validi), con
 #             griglia + bisezioni. Soglia della regione 0.20.
@@ -74,10 +68,10 @@ from scipy.linalg import cho_factor, cho_solve
 #             diag(rho_u) + D^T diag(rho_z) D)^-1 una volta per W_w. lam come la L1.
 #             Soglia della regione 0.20.
 #
-# STIMA DELL'INTENSITA' (mappa stima_per_metodo, una scelta per metodo). Regione
-# R (il "cluster") = voxel connessi (26-vicinato) al picco di p_j |A_j| con p_j |A_j| >=
-# soglia del picco e stesso segno (z_picco_comp = z di quel picco).
-#   "fit"       (default) il metodo di ricostruzione serve SOLO a trovare il cluster R;
+# STIMA DELL'INTENSITA' (mappa stima_per_metodo, una scelta per metodo; qui "debias"
+# per entrambi). Regione R (il "cluster") = voxel connessi (26-vicinato) al picco di
+# p_j |A_j| con p_j |A_j| >= soglia del picco e stesso segno (z_picco_comp = z di quel picco).
+#   "fit"       il metodo di ricostruzione serve SOLO a trovare il cluster R;
 #               poi si torna ai dati e si stima una sola dmu_a, uniforme su R, ai minimi
 #               quadrati pesati:
 #                   a = argmin ||a w_R - m_w||^2 = w_R^T m_w / w_R^T w_R,
@@ -103,7 +97,7 @@ from scipy.linalg import cho_factor, cho_solve
 #     dmu): gli 8 voxel hanno tutti dmu_a = dmu, non dmu/8. Il vero e' quindi
 #         vero = dmu * N_voxel_incl * V_vox = dmu * 8 * 64 mm^3
 #   - Ricostruzione: la sfocatura distribuisce l'assorbimento su un cluster che di solito
-#     ha piu' (TSVD/Tikhonov, decine di voxel) o meno (L1) voxel dell'inclusione, con
+#     ha piu' (cluster largo) o meno (L1, poche unita') voxel dell'inclusione, con
 #     valori per voxel piu' bassi o piu' alti del vero; l'integrale e' la grandezza che
 #     la sfocatura conserva, mentre il valore per voxel dipende dalla dimensione del
 #     cluster (col fit: a ~ 8 dmu / N_R se il cluster ha N_R voxel invece di 8).
@@ -120,9 +114,7 @@ from scipy.linalg import cho_factor, cho_solve
 # MODELLO DEL RUMORE NEI PESI (modello_sigma): "baseline" (sigma_0 dai conteggi
 # attesi) o "dati" (sigma dai conteggi osservati, metodo delta).
 #
-# NB: le soglie di TSVD e Tikhonov sono state scelte con N_tot = 1e8, coppie
-# 'primi_secondi_vicini' e 20 gate; qui valgono la configurazione dello scan L1/L1+TV
-# (N_tot = 1e7, 'primi_secondi_terzi_vicini', 25 gate, rumore del fondo).
+# Configurazione: N_tot = 1e7, coppie 'primi_secondi_terzi_vicini', 25 gate, rumore del fondo.
 
 # %% =============================================================
 # STEP 0 - Spettri
@@ -137,9 +129,9 @@ foglio_spettri = "new"                     # NON usare "mod": colonna Lipid disa
 cartella_risultati = os.path.dirname(os.path.abspath(file_spettri))
 # Stima dell'intensita' (vedi intestazione): "fit" o "integrale"
 # Stima dell'intensita' PER METODO (vedi intestazione): "fit", "integrale" o "debias".
-# Configurazione mista: integrale puro per i metodi lineari (TSVD, Tikhonov, senza
-# shrinkage) e integrale con debiasing di scala per L1 e L1+TV (che per la penalita'
-# sottostimano). Le tre stime sono comunque tutte nel file; questa mappa decide solo
+# Entrambi i metodi: "debias" = integrale spaziale V_vox sum_R A_hat moltiplicato per un
+# fattore di scala beta >= 0 stimato dai dati (toglie lo shrinkage di L1/L1+TV). Le tre
+# stime (fit, integrale, debias) sono comunque tutte nel file; questa mappa decide solo
 # quale va in rapporto_stima per ciascun metodo.
 stima_per_metodo = {"L1": "debias", "L1TV": "debias"}
 if set(stima_per_metodo.values()) - {"fit", "integrale", "debias"}:
@@ -783,28 +775,6 @@ def chi2_bersaglio():
 # Compensazione di profondita': p_j = max(||w_j||, 1/dmu_a_max)^gamma. Il minimo
 # 1/dmu_a_max evita di amplificare senza limite i voxel non osservabili.
 dmu_a_max = 0.05      # [mm^-1]
-# Taglio della base SVD di TSVD/Tikhonov: si tengono solo i modi con s_i/s_0 >= tol_sv.
-# A epsilon macchina (default) la base include modi con s_i minuscoli: ad alto SNR la
-# discrepanza ne tiene molti e c_i/s_i amplifica il rumore (posizione che "esplode",
-# intensita' sovrastimata). tol_sv limita il condizionamento a 1/tol_sv: la posizione
-# resta stabile; se il segnale cade su modi tagliati l'intensita' e' sottostimata (meglio
-# di una posizione sbagliata). 1e-3 -> amplificazione max 1000x.
-tol_sv = 1e-2
-
-# --- TSVD e Tikhonov (configurazione ottimale degli scan del 13-14/10) ---------------
-# gamma <= 0.4 sottostima in profondita' (P3 -20/-40%), gamma >= 0.7 sovrastima (P2-P3
-# fino a x2): 0.5-0.65 e' la finestra utile.
-gamma_tsvd = 0.5
-gamma_tik = 0.6
-# SOGLIA ADATTIVA della regione: dipende dalla profondita' RICOSTRUITA z_picco_comp del
-# picco di p_j |A_j| (nota anche con dati reali). Lista di (z_max, soglia): si usa la
-# prima con z_picco_comp <= z_max. In profondita' la sfocatura cresce e serve una
-# soglia piu' alta per non includere le code (sovrastima).
-regola_soglia = {
-    "TSVD":     [(10.0, 0.25), (np.inf, 0.30)],
-    "Tikhonov": [(10.0, 0.22), (np.inf, 0.28)],
-}
-
 # --- L1 (FISTA) ----------------------------------------------------------------------
 # gamma = 1.0 dagli scan L1 del 15/10 (con gamma < 1 la L1 sceglie spesso un supporto
 # parziale e sottostima di ~1/3 a 16-20 mm); soglia della regione 0.20.
@@ -843,7 +813,6 @@ METODI_DEF = [
      stima_per_metodo['L1TV'], 1.0, soglia_L1TV),
 ]
 METODI = tuple(m[0] for m in METODI_DEF)
-gamma_svd = tuple(sorted({gamma_tsvd, gamma_tik}))   # gamma per cui serve la SVD
 
 # --- soglie di significativita' (in unita' di deviazioni standard del rumore) --
 quantile_falsi_positivi = 0.99
@@ -870,36 +839,6 @@ print(f"   L1TV      alpha {alpha_tv} (L* = {6*(1-alpha_tv)/alpha_tv:.2f} voxel)
 # %% =============================================================
 # FUNZIONI - ricostruzione
 # ==================================================================
-# --- TSVD / Tikhonov (SVD di B = W_w diag(1/p)) --------------------------------------
-def tsvd_disc(c, m_w, s, Vt, target):
-    """TSVD con k per discrepanza: il piu' piccolo k con chi^2 <= target."""
-    chi2 = float(m_w @ m_w) - np.cumsum(c**2)
-    ok = np.where(chi2 <= target)[0]
-    k = int(ok[0]) + 1 if ok.size else s.size
-    return Vt[:k].T @ (c[:k] / s[:k]), k, float(chi2[k - 1])
-
-
-def tikhonov_disc(c, m_w, s, Vt, target):
-    """Tikhonov con lam per discrepanza (bisezione in log(lam)): chi^2 = target."""
-    res_fuori = max(float(m_w @ m_w) - np.sum(c**2), 0.0)
-    chi2 = lambda lam: res_fuori + np.sum(((1 - s**2/(s**2 + lam**2)) * c)**2)
-    lo, hi = np.log(1e-10*s[0]), np.log(10*s[0])
-    if chi2(np.exp(lo)) > target:
-        lam = np.exp(lo)
-    elif chi2(np.exp(hi)) < target:
-        lam = np.exp(hi)
-    else:
-        for _ in range(60):
-            mid = 0.5*(lo + hi)
-            if chi2(np.exp(mid)) > target:
-                hi = mid
-            else:
-                lo = mid
-        lam = np.exp(0.5*(lo + hi))
-    f = s**2/(s**2 + lam**2)
-    return Vt.T @ (f * c / s), lam, float(chi2(lam))
-
-
 # --- L1 (FISTA) -------------------------------------------------------------------
 def norma2_quadra(B, tol=1e-6, n_iter=300, margine=1.01):
     """||B||_2^2 (autovalore massimo di B^T B) col metodo delle potenze (+1%)."""
@@ -1227,7 +1166,7 @@ def salva_excel(righe, percorso):
     conf_df = pd.DataFrame({"parametro": ["composizione background", "scattering",
                                           "N_tot_TPSF", "coppie", "gate", "voxel",
                                           "dmu_a_max (compensazione)",
-                                          "TSVD", "Tikhonov", "L1 (FISTA)", "L1+TV (ADMM)",
+                                          "L1 (FISTA)", "L1+TV (ADMM)",
                                           "seme_rumore", "modello_sigma", "pesi",
                                           "soglie 'trovata' (calibrate)", "stima dell'integrale"],
                             "valore": [str(composizione),
@@ -1245,10 +1184,6 @@ def salva_excel(righe, percorso):
                                        f"misura: {con_fondo()}",
                                        f"{Nx}x{Ny}x{Nz}, lato {step} mm",
                                        f"{dmu_a_max}",
-                                       f"gamma {gamma_tsvd}; k per discrepanza (chi^2 <= N_validi); "
-                                       f"soglia adattiva {regola_soglia['TSVD']}",
-                                       f"gamma {gamma_tik}; lam per discrepanza (chi^2 = N_validi); "
-                                       f"soglia adattiva {regola_soglia['Tikhonov']}",
                                        f"gamma {gamma_L1}; lam per discrepanza: chi^2 = N_validi + "
                                        f"2 sqrt(2 N_validi); partenza da lam/lam_max = 1; se gia' "
                                        f"compatibile con i dati: f = {f_se_vuota}; griglia "
@@ -1370,7 +1305,6 @@ tempi_prep = {m: 0.0 for m in METODI}   # [s] preparazione delle matrici (ultima
 
 def prepara_pesi(sig):
     """W_w = W/sigma e le matrici di ciascun metodo (dipendono solo da W_w):
-      TSVD/Tikhonov  per ogni gamma: p_j e SVD di W_w diag(1/p) (modi con s_i > 0)
       L1             p_j, B = W_w diag(1/p) e ||B||^2 (passo di FISTA)
       L1+TV          p_j e q_e, penalita' rho_u, rho_z e Minv_tv
     tempi_prep: tempo di preparazione per metodo (la SVD di gamma condivisa e' contata
@@ -1651,7 +1585,7 @@ n_righe_caso = len(METODI)
 print(f"\nCasi con SNR atteso >= 20: {ril.shape[0] // n_righe_caso} su {df.shape[0] // n_righe_caso}")
 
 def per_metodo(tab):
-    """Righe nell'ordine TSVD, Tikhonov, L1, L1TV."""
+    """Righe nell'ordine L1, L1TV."""
     return tab.reindex([m for m in METODI if m in tab.index])
 
 print("\nRapporto mediano stima / vero (per posizione, SNR atteso >= 20):")
