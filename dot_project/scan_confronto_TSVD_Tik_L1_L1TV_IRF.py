@@ -503,7 +503,12 @@ seme_rumore = 42        # rumore riproducibile (un generatore unico per tutto lo
 #   "baseline" -> sigma_0 dai conteggi attesi di baseline, pesi una volta per lambda (veloce)
 #   "dati"     -> stimata dai conteggi osservati di ogni misura, pesi per caso (realistico,
 #                 piu' lento: SVD e fattorizzazione ADMM ripetute per ogni caso)
-modello_sigma = "dati"
+# "baseline" calcola i pesi (W_w, SVD, fattorizzazione ADMM) UNA volta per lambda (31
+# volte): molto piu' veloce. "dati" li ricalcola per OGNI caso (279) + ogni realizzazione
+# di calibrazione: ~9x piu' lento nel ciclo principale. Nel regime di Born
+# sigma_dati/sigma_0 ~ 1.000 (colonna sigma_dati_su_sigma0), quindi "baseline" e' quasi
+# equivalente. Usare "dati" solo per lo studio del rumore eteroschedastico.
+modello_sigma = "baseline"
 if modello_sigma not in ("dati", "baseline"):
     raise ValueError(f"modello_sigma = '{modello_sigma}' non valido: usare 'dati' o 'baseline'.")
 
@@ -837,8 +842,7 @@ gamma_svd = tuple(sorted({gamma_tsvd, gamma_tik}))   # gamma per cui serve la SV
 quantile_falsi_positivi = 0.99
 soglia_minima_sigma = 2.0                     # nessuna soglia 'trovata' sotto 2 sigma
 lambda_calibrazione = (650.0, 800.0, 950.0)   # [nm] lambda usate per la calibrazione
-n_realizzazioni_rumore = 100                  # misure di solo rumore per lambda (300 in tutto:
-                                              # il quantile 0.99 su 75 campioni era ~ il massimo)
+n_realizzazioni_rumore = 40                   # misure di solo rumore per lambda (120 in tutto)
 # Calibrazione con i pesi di baseline sig0 (una SVD e una fattorizzazione ADMM per
 # lambda invece che per realizzazione): nel regime di Born sigma_dati/sigma_0 ~ 1, e su
 # misure di solo rumore M_ideal = 0. False = pesi dai dati anche nella calibrazione.
